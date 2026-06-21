@@ -104,7 +104,7 @@ def load_settings():
 
             if "mode" in config_data: base_settings.MODE = config_data["mode"]
             if "paper_balance_usd" in config_data: base_settings.PAPER_BALANCE_USD = config_data["paper_balance_usd"]
-            if "private_key" in config_data: base_settings.PRIVATE_KEY = config_data["private_key"]
+            if config_data.get("private_key"): base_settings.PRIVATE_KEY = config_data["private_key"]
 
             if "polymarket" in config_data:
                 poly = config_data["polymarket"]

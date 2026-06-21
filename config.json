@@ -27,7 +27,7 @@
   },
   "flip": {
     "enabled": true,
-    "min_conviction": 0.65,
+    "min_conviction": 0.60,
     "min_minutes_left": 4
   },
   "chainlink": {

@@ -570,8 +570,29 @@ async def broadcast_state():
             ws_clients.discard(ws)
 
 
+_USDC_BALANCEOF_ABI = [{"constant": True, "inputs": [{"name": "a", "type": "address"}],
+                        "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}],
+                        "stateMutability": "view", "type": "function"}]
+
+async def get_onchain_usdc() -> Optional[float]:
+    """Read the wallet's USDC.e (Polymarket collateral) balance directly on-chain via
+    the ordered Polygon RPCs (Alchemy first). Returns dollars, or None on failure."""
+    owner = derive_address(settings.PRIVATE_KEY)
+    if not owner:
+        return None
+    from web3 import AsyncWeb3
+    for rpc in chainlink.chainlink_fetcher.get_ordered_rpcs():
+        try:
+            w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc, request_kwargs={"timeout": 10.0}))
+            usdc = w3.eth.contract(address=AsyncWeb3.to_checksum_address(settings.USDC_ADDRESS), abi=_USDC_BALANCEOF_ABI)
+            bal = await usdc.functions.balanceOf(AsyncWeb3.to_checksum_address(owner)).call()
+            return float(bal) / 1_000_000  # USDC uses 6 decimals
+        except Exception:
+            continue
+    return None
+
 async def refresh_live_balance_if_due(force: bool = False):
-    """In LIVE mode, refresh the displayed balance from the real on-chain USDC
+    """In LIVE mode, refresh the displayed balance from the real on-chain USDC.e
     balance (throttled to ~30s). No-op in paper mode, where the balance is the
     simulated paper balance. Safe to call from anywhere (loop or HTTP handler);
     the shared throttle prevents over-fetching."""
@@ -581,7 +602,9 @@ async def refresh_live_balance_if_due(force: bool = False):
     if not force and now_ts - state.get("last_balance_refresh", 0) < 30:
         return
     state["last_balance_refresh"] = now_ts  # set before await so concurrent calls don't double-fetch
-    real_bal = await asyncio.to_thread(clob_trader.get_usdc_balance)
+    real_bal = await get_onchain_usdc()
+    if real_bal is None:  # fall back to the CLOB collateral API
+        real_bal = await asyncio.to_thread(clob_trader.get_usdc_balance)
     if real_bal is not None:
         state["paper_balance"] = real_bal
 
@@ -864,9 +887,11 @@ async def post_settings(new_settings: Dict[str, Any]):
     old_symbol = settings.SYMBOL
 
     new_pk = new_settings.get("private_key")
-    if new_pk and "..." in new_pk:
+    if not new_pk or "..." in new_pk:
+        # Blank field or still-masked value → keep the stored secret. NEVER let a
+        # save with an empty key field wipe the saved private key / seed phrase.
         new_settings["private_key"] = settings.PRIVATE_KEY
-    elif new_pk:
+    else:
         settings.PRIVATE_KEY = new_pk
 
     # Deep-merge into the existing config so keys not present in the settings form

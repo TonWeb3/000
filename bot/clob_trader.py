@@ -164,6 +164,12 @@ class ClobTrader:
         try:
             from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
             params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            # Polymarket caches the collateral balance; refresh it first or a freshly
+            # funded wallet can read 0 until update is called.
+            try:
+                self.client.update_balance_allowance(params)
+            except Exception:
+                pass
             res = self.client.get_balance_allowance(params)
             raw = res.get("balance") if isinstance(res, dict) else None
             if raw is None:
