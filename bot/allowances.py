@@ -12,7 +12,7 @@ Requires the trading wallet to hold a little POL/MATIC for gas.
 from typing import Dict, Any, List
 from web3 import AsyncWeb3
 from .config import settings
-from .chainlink import chainlink_fetcher  # reuse its ordered Polygon RPC list
+from .chainlink import chainlink_fetcher, get_async_w3  # ordered RPC list + cached web3
 from .wallet import resolve_private_key, derive_address
 
 MAX_UINT256 = (2 ** 256) - 1
@@ -130,7 +130,7 @@ async def ensure_allowances() -> Dict[str, Any]:
     conn_err = None
     for rpc in rpcs:
         try:
-            cand = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc, request_kwargs={"timeout": 20.0}))
+            cand = get_async_w3(rpc)  # cached per-RPC (no aiohttp session leak)
             await cand.eth.get_block_number()  # a real read confirms it works
             w3 = cand
             break

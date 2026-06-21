@@ -583,7 +583,7 @@ async def get_onchain_usdc() -> Optional[float]:
     from web3 import AsyncWeb3
     for rpc in chainlink.chainlink_fetcher.get_ordered_rpcs():
         try:
-            w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc, request_kwargs={"timeout": 10.0}))
+            w3 = chainlink.get_async_w3(rpc)  # cached per-RPC (no aiohttp session leak)
             usdc = w3.eth.contract(address=AsyncWeb3.to_checksum_address(settings.USDC_ADDRESS), abi=_USDC_BALANCEOF_ABI)
             bal = await usdc.functions.balanceOf(AsyncWeb3.to_checksum_address(owner)).call()
             return float(bal) / 1_000_000  # USDC uses 6 decimals
