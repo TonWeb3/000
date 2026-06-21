@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     EV_THRESHOLD: float = 0.04          # require >= this expected value per $1 share (after price)
     MIN_PROB_EV: float = 0.55           # don't bet near-coinflips even if EV looks positive
     MIN_BOOK_LIQUIDITY_USD: float = 20.0  # skip if the ask side can't absorb the stake
+    ENTRY_MIN_MINUTES_LEFT: float = 2.0   # don't enter the degenerate end-of-window (dust books)
+    ENTRY_MIN_PRICE: float = 0.05         # don't buy near-worthless shares (dust / stale quotes)
 
     # Close-and-flip the open position on a strong opposite signal
     FLIP_ENABLED: bool = False
@@ -131,6 +133,8 @@ def load_settings():
                 if "ev_threshold" in ev: base_settings.EV_THRESHOLD = float(ev["ev_threshold"])
                 if "min_prob" in ev: base_settings.MIN_PROB_EV = float(ev["min_prob"])
                 if "min_book_liquidity_usd" in ev: base_settings.MIN_BOOK_LIQUIDITY_USD = float(ev["min_book_liquidity_usd"])
+                if "entry_min_minutes_left" in ev: base_settings.ENTRY_MIN_MINUTES_LEFT = float(ev["entry_min_minutes_left"])
+                if "entry_min_price" in ev: base_settings.ENTRY_MIN_PRICE = float(ev["entry_min_price"])
 
             if "flip" in config_data:
                 flip = config_data["flip"]

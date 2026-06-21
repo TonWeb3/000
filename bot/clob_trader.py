@@ -13,8 +13,19 @@ This client does NOT set on-chain allowances; orders are rejected without them.
 """
 
 import threading
+import time
 from typing import Optional, Dict, Any
 from .config import settings
+
+
+def _is_transient(e: Exception) -> bool:
+    """A transport-level failure (no HTTP response) is safe to retry — the order
+    never reached the matching engine. An API rejection (has a status code) is not."""
+    sc = getattr(e, "status_code", "missing")
+    if sc is None:  # PolyApiException 'Request exception!' carries status_code=None
+        return True
+    name = type(e).__name__.lower()
+    return any(k in name for k in ("connection", "timeout", "requestexception", "ssl"))
 
 
 class ClobTrader:
@@ -110,12 +121,8 @@ class ClobTrader:
                 # Older client without a `price` field on MarketOrderArgs
                 args = MarketOrderArgs(token_id=str(token_id), amount=amount, side=BUY)
 
-            signed = self.client.create_market_order(args)
-            resp = self.client.post_order(signed, OrderType.FOK)
-
-            ok = True
-            if isinstance(resp, dict) and resp.get("success") is False:
-                ok = False
+            resp = self._submit(args, OrderType.FOK)
+            ok = not (isinstance(resp, dict) and resp.get("success") is False)
             return {"ok": ok, "response": resp, "limit_price": limit_price}
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
@@ -147,15 +154,25 @@ class ClobTrader:
             except TypeError:
                 args = MarketOrderArgs(token_id=str(token_id), amount=amount, side=SELL)
 
-            signed = self.client.create_market_order(args)
-            resp = self.client.post_order(signed, OrderType.FOK)
-
-            ok = True
-            if isinstance(resp, dict) and resp.get("success") is False:
-                ok = False
+            resp = self._submit(args, OrderType.FOK)
+            ok = not (isinstance(resp, dict) and resp.get("success") is False)
             return {"ok": ok, "response": resp, "limit_price": limit_price}
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _submit(self, args, order_type, attempts: int = 3):
+        """create + post a market order, retrying only TRANSIENT transport failures
+        (e.g. PolyApiException 'Request exception!') with backoff. An API rejection
+        (real status code) is raised immediately — not retried — to avoid double-fills."""
+        for i in range(attempts):
+            try:
+                signed = self.client.create_market_order(args)
+                return self.client.post_order(signed, order_type)
+            except Exception as e:
+                if i < attempts - 1 and _is_transient(e):
+                    time.sleep(0.4 * (i + 1))
+                    continue
+                raise
 
     def get_usdc_balance(self) -> Optional[float]:
         """Best-effort collateral (USDC) balance in dollars, or None on failure."""
