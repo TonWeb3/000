@@ -3,14 +3,14 @@ import time
 import json
 import os
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from bot.config import settings
+from bot.config import settings, normalize_private_key
 import bot.data as data
 import bot.ws_data as ws_data
 import bot.chainlink as chainlink
@@ -18,7 +18,6 @@ import bot.indicators as indicators
 import bot.engines as engines
 import bot.utils as utils
 from bot.clob_trader import clob_trader
-from bot.wallet import mask_secret, derive_address
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -35,7 +34,6 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(binance_kline_5m.start()),
         asyncio.create_task(polymarket_ws_stream.start()),
         asyncio.create_task(chainlink_ws_stream.start()),
-        asyncio.create_task(polymarket_clob_stream.start()),
         asyncio.create_task(update_loop())
     ]
 
@@ -50,7 +48,6 @@ async def lifespan(app: FastAPI):
     binance_kline_5m.close()
     polymarket_ws_stream.close()
     chainlink_ws_stream.close()
-    polymarket_clob_stream.close()
 
 app = FastAPI(title="Polymarket BTC 15m Assistant", lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
@@ -66,9 +63,7 @@ state = {
     "logs": [],
     "last_trade_side": None,
     "last_balance_refresh": 0,
-    # The bot starts STOPPED. The user clicks Start on the dashboard to begin
-    # scanning/trading; Stop halts the whole loop. (In-memory, defaults off on boot.)
-    "running": False
+    "running": False  # trading is off until the user presses Start on the dashboard
 }
 
 def save_state():
@@ -128,8 +123,6 @@ polymarket_ws_stream = ws_data.PolymarketChainlinkStream(
     symbol_includes=get_ws_symbol_filter(settings.SYMBOL)
 )
 chainlink_ws_stream = ws_data.ChainlinkPriceStream(aggregator=settings.get_aggregator(settings.SYMBOL))
-# Real-time Polymarket order book / prices (replaces CLOB REST polling).
-polymarket_clob_stream = ws_data.PolymarketClobStream()
 
 def get_candle_window_timing(window_minutes: int) -> Dict[str, float]:
     now_ms = time.time() * 1000
@@ -147,12 +140,7 @@ def get_candle_window_timing(window_minutes: int) -> Dict[str, float]:
         "remainingMinutes": remaining_ms / 60_000
     }
 
-# Gamma market discovery has no WebSocket, so it's REST — but throttled (a new 15m
-# market only appears every 15 min). The live prices/book come from the CLOB socket.
-_poly_discovery = {"ts": 0.0, "data": None}
-POLY_DISCOVERY_INTERVAL_S = 5
-
-async def _discover_market() -> Dict[str, Any]:
+async def fetch_polymarket_snapshot() -> Dict[str, Any]:
     market = None
     if settings.POLYMARKET_SLUG:
         market = await data.fetch_market_by_slug(settings.POLYMARKET_SLUG)
@@ -167,7 +155,7 @@ async def _discover_market() -> Dict[str, Any]:
             market = live_markets[0]
 
     if not market:
-        return {"ok": False}
+        return {"ok": False, "reason": "market_not_found"}
 
     outcomes = market.get("outcomes", [])
     if isinstance(outcomes, str):
@@ -199,47 +187,37 @@ async def _discover_market() -> Dict[str, Any]:
     gamma_no = float(outcome_prices[down_index]) if down_index >= 0 and down_index < len(outcome_prices) else None
 
     if not up_token_id or not down_token_id:
-        return {"ok": False}
+        return {"ok": False, "reason": "missing_token_ids"}
 
-    return {"ok": True, "market": market, "up_token": up_token_id, "down_token": down_token_id,
-            "gamma_up": gamma_yes, "gamma_down": gamma_no}
-
-async def fetch_polymarket_snapshot() -> Dict[str, Any]:
-    now = time.time()
-    if _poly_discovery["data"] is None or now - _poly_discovery["ts"] > POLY_DISCOVERY_INTERVAL_S:
-        try:
-            disc = await _discover_market()
-        except Exception:
-            disc = {"ok": False}
-        if disc.get("ok"):
-            _poly_discovery["data"] = disc
-            _poly_discovery["ts"] = now
-
-    disc = _poly_discovery["data"]
-    if not disc or not disc.get("ok"):
-        return {"ok": False, "reason": "market_not_found"}
-
-    up_token = disc["up_token"]
-    down_token = disc["down_token"]
-
-    # Point the live order-book socket at the active market's tokens (re-subscribes
-    # on rotation). Read prices/depth from it; fall back to Gamma's last prices only
-    # for the brief moment after a rotation before the book snapshot arrives.
-    polymarket_clob_stream.set_assets([up_token, down_token])
-    up_buy = polymarket_clob_stream.get_buy_price(up_token)
-    down_buy = polymarket_clob_stream.get_buy_price(down_token)
+    try:
+        up_buy, down_buy, up_book, down_book = await asyncio.gather(
+            data.fetch_clob_price(up_token_id, "buy"),
+            data.fetch_clob_price(down_token_id, "buy"),
+            data.fetch_order_book(up_token_id),
+            data.fetch_order_book(down_token_id)
+        )
+        up_book_summary = data.summarize_order_book(up_book)
+        down_book_summary = data.summarize_order_book(down_book)
+    except:
+        up_buy = None
+        down_buy = None
+        up_book_summary = {"bestBid": None, "bestAsk": None, "spread": None, "bidLiquidity": None, "askLiquidity": None}
+        down_book_summary = {"bestBid": None, "bestAsk": None, "spread": None, "bidLiquidity": None, "askLiquidity": None}
 
     return {
         "ok": True,
-        "market": disc["market"],
+        "market": market,
         "prices": {
-            "up": up_buy if up_buy is not None else disc["gamma_up"],
-            "down": down_buy if down_buy is not None else disc["gamma_down"]
+            "up": up_buy if up_buy is not None else gamma_yes,
+            "down": down_buy if down_buy is not None else gamma_no
         },
-        "token_ids": {"up": up_token, "down": down_token},
+        "token_ids": {
+            "up": up_token_id,
+            "down": down_token_id
+        },
         "orderbook": {
-            "up": polymarket_clob_stream.get_summary(up_token),
-            "down": polymarket_clob_stream.get_summary(down_token)
+            "up": up_book_summary,
+            "down": down_book_summary
         }
     }
 
@@ -541,74 +519,6 @@ async def seed_kline_buffers():
     except Exception as e:
         log_message(f"Failed to seed kline buffers: {e}")
 
-# Connected dashboard WebSocket clients. They are PUSHED to (broadcast below) and
-# never polled; there is no per-connection timer.
-ws_clients = set()
-
-def build_dashboard_payload():
-    return {
-        "latest": state["latest_data"],
-        "status": {
-            "running": state["running"],
-            "balance": state["paper_balance"],
-            "mode": state["trading_mode"],
-            "active_trades": len(state["active_trades"])
-        },
-        "logs": state["logs"][-100:],
-        "history": state["trade_history"][-100:]
-    }
-
-async def broadcast_state():
-    """Push the current state to every connected dashboard client."""
-    if not ws_clients:
-        return
-    payload = build_dashboard_payload()
-    for ws in list(ws_clients):
-        try:
-            await ws.send_json(payload)
-        except Exception:
-            ws_clients.discard(ws)
-
-
-_USDC_BALANCEOF_ABI = [{"constant": True, "inputs": [{"name": "a", "type": "address"}],
-                        "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}],
-                        "stateMutability": "view", "type": "function"}]
-
-async def get_onchain_usdc() -> Optional[float]:
-    """Read the wallet's USDC.e (Polymarket collateral) balance directly on-chain via
-    the ordered Polygon RPCs (Alchemy first). Returns dollars, or None on failure."""
-    owner = derive_address(settings.PRIVATE_KEY)
-    if not owner:
-        return None
-    from web3 import AsyncWeb3
-    for rpc in chainlink.chainlink_fetcher.get_ordered_rpcs():
-        try:
-            w3 = chainlink.get_async_w3(rpc)  # cached per-RPC (no aiohttp session leak)
-            usdc = w3.eth.contract(address=AsyncWeb3.to_checksum_address(settings.USDC_ADDRESS), abi=_USDC_BALANCEOF_ABI)
-            bal = await usdc.functions.balanceOf(AsyncWeb3.to_checksum_address(owner)).call()
-            return float(bal) / 1_000_000  # USDC uses 6 decimals
-        except Exception:
-            continue
-    return None
-
-async def refresh_live_balance_if_due(force: bool = False):
-    """In LIVE mode, refresh the displayed balance from the real on-chain USDC.e
-    balance (throttled to ~30s). No-op in paper mode, where the balance is the
-    simulated paper balance. Safe to call from anywhere (loop or HTTP handler);
-    the shared throttle prevents over-fetching."""
-    if state["trading_mode"] != "live":
-        return
-    now_ts = time.time()
-    if not force and now_ts - state.get("last_balance_refresh", 0) < 30:
-        return
-    state["last_balance_refresh"] = now_ts  # set before await so concurrent calls don't double-fetch
-    real_bal = await get_onchain_usdc()
-    if real_bal is None:  # fall back to the CLOB collateral API
-        real_bal = await asyncio.to_thread(clob_trader.get_usdc_balance)
-    if real_bal is not None:
-        state["paper_balance"] = real_bal
-
-
 async def update_loop():
     csv_header = [
         "timestamp", "entry_minute", "time_left_min", "signal",
@@ -618,15 +528,6 @@ async def update_loop():
 
     while True:
         try:
-            # Kill switch: when stopped, the loop does no scanning, no decisions,
-            # no order placement and no trade management — it just idles, but still
-            # keeps the live balance current and pushes status to the dashboard.
-            if not state["running"]:
-                await refresh_live_balance_if_due()
-                await broadcast_state()
-                await asyncio.sleep(settings.POLL_INTERVAL_MS / 1000)
-                continue
-
             timing = get_candle_window_timing(settings.CANDLE_WINDOW_MINUTES)
 
             binance_ws = binance_stream.get_last()
@@ -637,23 +538,21 @@ async def update_loop():
             poly_ws = polymarket_ws_stream.get_last()
             cl_ws = chainlink_ws_stream.get_last()
 
-            # Polymarket prices/book from the CLOB socket (discovery is throttled inside).
-            try:
-                poly_snapshot = await fetch_polymarket_snapshot()
-            except Exception:
-                poly_snapshot = {"ok": False}
+            results = await asyncio.gather(
+                data.fetch_last_price(settings.SYMBOL),
+                chainlink.chainlink_fetcher.fetch_chainlink_btc_usd(),
+                fetch_polymarket_snapshot(),
+                return_exceptions=True
+            )
+
+            last_price = results[0] if not isinstance(results[0], Exception) else None
+            chainlink_data = results[1] if not isinstance(results[1], Exception) else {}
+            poly_snapshot = results[2] if not isinstance(results[2], Exception) else {"ok": False}
 
             klines_1m = binance_kline_1m.get_candles()
             klines_5m = binance_kline_5m.get_candles()
 
-            # Spot from the Binance trade socket. One-off REST only when the socket has
-            # no price yet (startup / reconnect) — no steady-state polling.
-            spot_price = binance_ws.get("price")
-            if not spot_price:
-                try:
-                    spot_price = await data.fetch_last_price(settings.SYMBOL)
-                except Exception:
-                    spot_price = None
+            spot_price = binance_ws.get("price") if binance_ws and binance_ws.get("price") else last_price
 
             mc_steps = max(1, __import__('math').ceil(timing["remainingMinutes"] / 5))
 
@@ -665,8 +564,8 @@ async def update_loop():
                         target_open = c["open"]
                         break
 
-            # Fast closed-form fair probability (equivalent to a Monte-Carlo sim of the
-            # same process, ~1000x cheaper — which a latency play needs).
+            # Fast closed-form fair probability (replaces 1000-sim Monte Carlo —
+            # backtest-verified equivalent, ~1000x cheaper, which a latency play needs).
             drift_5m, sigma_5m = indicators.realized_drift_vol(klines_5m, lookback=300)
             fair_up = indicators.fair_prob_up(spot_price or 0, target_open or 0, mc_steps, sigma_5m, drift_per_step=drift_5m or 0.0)
             fair_data = {
@@ -686,15 +585,9 @@ async def update_loop():
             elif poly_ws.get("price"):
                 current_price = poly_ws["price"]
                 price_source = "Polymarket WS"
-            else:
-                # Neither settlement socket has a price yet — one-off REST fallback.
-                try:
-                    cd = await chainlink.chainlink_fetcher.fetch_chainlink_btc_usd()
-                    if cd.get("price"):
-                        current_price = cd["price"]
-                        price_source = "Chainlink RPC REST"
-                except Exception:
-                    pass
+            elif chainlink_data.get("price"):
+                current_price = chainlink_data["price"]
+                price_source = "Chainlink RPC REST"
             settlement_ms = None
             if poly_snapshot["ok"] and poly_snapshot["market"].get("endDate"):
                 settlement_ms = datetime.fromisoformat(poly_snapshot["market"]["endDate"].replace('Z', '+00:00')).timestamp() * 1000
@@ -742,9 +635,6 @@ async def update_loop():
                 "priceDown": market_down,
                 "minProb": settings.MIN_PROB_EV,
                 "evThreshold": settings.EV_THRESHOLD,
-                "minPrice": settings.ENTRY_MIN_PRICE,
-                "timeLeftMin": time_left_min,
-                "minMinutesLeft": settings.ENTRY_MIN_MINUTES_LEFT,
                 "rsi": rsi_now,
                 "haExhaustedGreen": ha_exhausted_green,
                 "haExhaustedRed": ha_exhausted_red,
@@ -752,15 +642,26 @@ async def update_loop():
 
             current_prices_dict = {"spot": spot_price, "chainlink": current_price}
 
+            # Trading actions only fire when the user has pressed Start. Data, prices
+            # and the dashboard keep updating regardless so the balance view stays live.
             exec_result = None
-            if poly_snapshot["ok"]:
+            if poly_snapshot["ok"] and state["running"]:
                 await maybe_flip_position(decision, poly_snapshot, time_left_min)
                 exec_result = await execute_trade(decision, poly_snapshot["prices"], poly_snapshot["market"], target_open, poly_snapshot.get("token_ids", {}), poly_snapshot.get("orderbook", {}))
+            elif not state["running"]:
+                exec_result = "stopped"
 
+            # Always keep settling any already-open positions so they can't get stuck.
             await update_trades(current_prices_dict)
 
-            # In live mode, reflect the real on-chain USDC balance in the dashboard.
-            await refresh_live_balance_if_due()
+            # In live mode, reflect the real on-chain USDC balance in the dashboard
+            if state["trading_mode"] == "live":
+                now_ts = time.time()
+                if now_ts - state.get("last_balance_refresh", 0) > 30:
+                    real_bal = await asyncio.to_thread(clob_trader.get_usdc_balance)
+                    if real_bal is not None:
+                        state["paper_balance"] = real_bal
+                    state["last_balance_refresh"] = now_ts
 
             signal_label = f"BUY {decision['side']}" if decision["action"] == "ENTER" else "NO TRADE"
             utils.append_csv_row("./logs/signals.csv", csv_header, [
@@ -777,6 +678,7 @@ async def update_loop():
                 "trading_state": {
                     "mode": state["trading_mode"],
                     "balance": state["paper_balance"],
+                    "running": state["running"],
                     "active_trades": state["active_trades"],
                     "history_count": len(state["trade_history"]),
                     "risk": {"type": settings.RISK_TYPE, "value": settings.RISK_VALUE},
@@ -800,7 +702,6 @@ async def update_loop():
                 }
             }
             state["last_update_ts"] = time.time()
-            await broadcast_state()  # push the fresh frame to all dashboard clients
 
         except Exception as e:
             print(f"Error in update loop: {e}")
@@ -820,25 +721,6 @@ async def get_settings_page(request: Request):
 async def get_latest():
     return state["latest_data"]
 
-@app.websocket("/ws")
-async def ws_dashboard(websocket: WebSocket):
-    """Real-time push to the dashboard. The client is registered and PUSHED to by
-    broadcast_state() (driven by the bot loop / actions) — it is never polled. This
-    handler only sends one initial snapshot, then waits for disconnect."""
-    await websocket.accept()
-    ws_clients.add(websocket)
-    try:
-        await refresh_live_balance_if_due()
-        await websocket.send_json(build_dashboard_payload())  # immediate snapshot
-        while True:
-            await websocket.receive_text()  # block until the client disconnects (no polling)
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        ws_clients.discard(websocket)
-
 @app.get("/api/logs")
 async def get_logs():
     return state["logs"]
@@ -849,13 +731,19 @@ async def get_available_series():
 
 @app.get("/api/settings")
 async def get_settings():
-    masked_pk = mask_secret(settings.PRIVATE_KEY)
+    pk = settings.PRIVATE_KEY
+    masked_pk = pk[:6] + "..." + pk[-4:] if pk and len(pk) > 10 else pk
 
     return {
         "mode": settings.MODE,
         "paper_balance_usd": settings.PAPER_BALANCE_USD,
         "private_key": masked_pk,
-        "wallet_address": derive_address(settings.PRIVATE_KEY),
+        "chainlink": {
+            "alchemy_api_key": settings.ALCHEMY_API_KEY
+        },
+        "relayer": {
+            "api_key": settings.RELAYER_API_KEY
+        },
         "polymarket": {
             "series_id": settings.POLYMARKET_SERIES_ID,
             "gamma_base_url": settings.GAMMA_BASE_URL,
@@ -878,9 +766,6 @@ async def get_settings():
             "enabled": settings.FLIP_ENABLED,
             "min_conviction": settings.FLIP_MIN_CONVICTION,
             "min_minutes_left": settings.FLIP_MIN_MINUTES_LEFT
-        },
-        "chainlink": {
-            "alchemy_api_key": settings.ALCHEMY_API_KEY
         }
     }
 
@@ -889,13 +774,19 @@ async def post_settings(new_settings: Dict[str, Any]):
     global binance_stream, polymarket_ws_stream, chainlink_ws_stream, binance_kline_1m, binance_kline_5m
     old_symbol = settings.SYMBOL
 
+    # Credential may be a hex private key OR a 12/24-word seed phrase. We persist
+    # only the derived hex key (EOA) so the seed phrase is never written to disk.
     new_pk = new_settings.get("private_key")
-    if not new_pk or "..." in new_pk:
-        # Blank field or still-masked value → keep the stored secret. NEVER let a
-        # save with an empty key field wipe the saved private key / seed phrase.
-        new_settings["private_key"] = settings.PRIVATE_KEY
-    else:
-        settings.PRIVATE_KEY = new_pk
+    if new_pk and "..." in new_pk:
+        new_settings["private_key"] = settings.PRIVATE_KEY  # masked value unchanged
+    elif new_pk:
+        try:
+            resolved = normalize_private_key(new_pk)
+        except Exception as e:
+            log_message(f"Invalid private key / seed phrase: {e}")
+            resolved = ""
+        settings.PRIVATE_KEY = resolved
+        new_settings["private_key"] = resolved
 
     # Deep-merge into the existing config so keys not present in the settings form
     # (chainlink, binance_base_url, poll_interval_ms, etc.) are preserved.
@@ -941,29 +832,30 @@ async def post_settings(new_settings: Dict[str, Any]):
         settings.FLIP_MIN_CONVICTION = float(f.get("min_conviction", settings.FLIP_MIN_CONVICTION))
         settings.FLIP_MIN_MINUTES_LEFT = float(f.get("min_minutes_left", settings.FLIP_MIN_MINUTES_LEFT))
 
-    if "chainlink" in new_settings:
-        cl = new_settings["chainlink"]
-        if "alchemy_api_key" in cl:
-            settings.ALCHEMY_API_KEY = cl["alchemy_api_key"]
-        # Restart the Chainlink price socket so a new Alchemy/RPC endpoint applies now
-        # (HTTP RPC calls — allowances/price fallback — pick it up immediately).
-        chainlink_ws_stream.close()
-        chainlink_ws_stream = ws_data.ChainlinkPriceStream(aggregator=settings.get_aggregator(settings.SYMBOL))
-        asyncio.create_task(chainlink_ws_stream.start())
-
     if "polymarket" in new_settings:
         p = new_settings["polymarket"]
         settings.POLYMARKET_SERIES_ID = p.get("series_id", settings.POLYMARKET_SERIES_ID)
         settings.POLYMARKET_UP_LABEL = p.get("up_label", settings.POLYMARKET_UP_LABEL)
         settings.POLYMARKET_DOWN_LABEL = p.get("down_label", settings.POLYMARKET_DOWN_LABEL)
 
-    # Credentials may have changed — drop the cached CLOB client so the
-    # next live order re-initialises with the new key/seed.
+    if "chainlink" in new_settings:
+        cl = new_settings["chainlink"]
+        if "alchemy_api_key" in cl:
+            settings.ALCHEMY_API_KEY = cl["alchemy_api_key"]
+
+    if "relayer" in new_settings:
+        rl = new_settings["relayer"]
+        if "api_key" in rl:
+            settings.RELAYER_API_KEY = rl["api_key"]
+        if "api_key_address" in rl:
+            settings.RELAYER_API_KEY_ADDRESS = rl["api_key_address"]
+
+    # Credentials/signature may have changed — drop the cached CLOB client so the
+    # next live order re-initialises with the new key/seed-derived wallet.
     clob_trader.reset()
 
     state["trading_mode"] = settings.MODE
     state["paper_balance"] = settings.PAPER_BALANCE_USD
-    state["last_balance_refresh"] = 0  # force a fresh on-chain read next status poll (live mode)
 
     if settings.SYMBOL != old_symbol:
         binance_stream.close()
@@ -993,68 +885,42 @@ async def post_settings(new_settings: Dict[str, Any]):
 
     return {"status": "ok"}
 
-@app.post("/api/validate-key")
-async def validate_key(payload: Dict[str, Any]):
-    """Test whether the supplied value is a valid private key or seed phrase, and
-    return the derived wallet address. If the field still shows a masked value, the
-    already-saved secret is validated instead. The secret is never logged."""
-    secret = (payload.get("private_key") or "").strip()
-    if "..." in secret:                       # field still shows the masked value
-        secret = settings.PRIVATE_KEY
-    if not secret:
-        return {"valid": False, "error": "Enter a private key or seed phrase"}
-    addr = derive_address(secret)
-    if addr:
-        kind = "seed phrase" if len(secret.split()) >= 12 else "private key"
-        return {"valid": True, "address": addr, "kind": kind}
-    return {"valid": False, "error": "Not a valid private key or seed phrase"}
-
-@app.post("/api/setup-allowances")
-async def setup_allowances():
-    import bot.allowances as allowances
-    try:
-        result = await allowances.ensure_allowances()
-        if result.get("ok"):
-            if result.get("skipped"):
-                log_message(f"Allowance setup skipped: {result.get('reason')}")
-            elif result.get("already_set"):
-                log_message("Allowances already configured for trading wallet")
-            else:
-                log_message(f"Allowances configured ({len(result.get('actions', []))} tx)")
-        else:
-            log_message(f"Allowance setup failed: {result.get('message') or result.get('error')}")
-        return result
-    except Exception as e:
-        log_message(f"Allowance setup error: {e}")
-        return {"ok": False, "error": str(e)}
+def _reflect_running_now():
+    """Mirror the running flag into latest_data immediately so /api/latest is in sync
+    on the very next poll (the update loop would otherwise lag ~1s, flickering the UI)."""
+    ts = state["latest_data"].get("trading_state")
+    if isinstance(ts, dict):
+        ts["running"] = state["running"]
 
 @app.post("/api/start")
-async def start_bot():
-    if not state["running"]:
-        state["running"] = True
-        log_message("Bot STARTED — scanning for trading opportunities")
-        await broadcast_state()
-    return {"running": True}
+async def start_trading():
+    """Begin trading. Data/prices already stream continuously; this flips the gate so
+    the engine may enter/flip trades."""
+    state["running"] = True
+    _reflect_running_now()
+    log_message("Trading STARTED by user")
+    return {"ok": True, "running": True}
 
 @app.post("/api/stop")
-async def stop_bot():
-    if state["running"]:
-        state["running"] = False
-        log_message("Bot STOPPED — all trading halted")
-        await broadcast_state()
-    return {"running": False}
+async def stop_trading():
+    """Stop all trading. New entries and flips are halted immediately; any already-open
+    position keeps settling to expiry so it can't get stuck."""
+    state["running"] = False
+    _reflect_running_now()
+    log_message("Trading STOPPED by user")
+    return {"ok": True, "running": False}
 
-@app.get("/api/status")
-async def get_status():
-    # Keep the displayed balance correct in BOTH modes, even while the bot is
-    # stopped: paper = simulated balance; live = real on-chain USDC (throttled).
-    await refresh_live_balance_if_due()
-    return {
-        "running": state["running"],
-        "balance": state["paper_balance"],
-        "mode": state["trading_mode"],
-        "active_trades": len(state["active_trades"])
-    }
+@app.post("/api/test-credentials")
+async def test_credentials():
+    """Validate the saved private key / seed phrase: derive the EOA wallet address and
+    confirm the CLOB client initialises. Returns the address (and USDC balance)."""
+    result = await asyncio.to_thread(clob_trader.test_connection)
+    if result.get("ok"):
+        bal = result.get("usdc_balance")
+        log_message(f"Credential test OK: wallet {result.get('address')}" + (f" (USDC ${bal:.2f})" if bal is not None else ""))
+    else:
+        log_message(f"Credential test failed: {result.get('error')}")
+    return result
 
 @app.get("/health")
 async def health():

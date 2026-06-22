@@ -113,3 +113,52 @@ def flatten_event_markets(events: List[Dict]) -> List[Dict]:
         if isinstance(markets, list):
             out.extend(markets)
     return out
+
+async def fetch_clob_price(token_id: str, side: str) -> Optional[float]:
+    url = f"{settings.CLOB_BASE_URL}/price"
+    params = {"token_id": token_id, "side": side}
+    proxy = get_proxy_url_for(url)
+    async with httpx.AsyncClient(proxy=proxy if proxy else None) as client:
+        res = await client.get(url, params=params)
+        res.raise_for_status()
+        data = res.json()
+    return to_number(data.get("price"))
+
+async def fetch_order_book(token_id: str) -> Dict:
+    url = f"{settings.CLOB_BASE_URL}/book"
+    params = {"token_id": token_id}
+    proxy = get_proxy_url_for(url)
+    async with httpx.AsyncClient(proxy=proxy if proxy else None) as client:
+        res = await client.get(url, params=params)
+        res.raise_for_status()
+        return res.json()
+
+def summarize_order_book(book: Dict, depth_levels: int = 5) -> Dict:
+    bids = book.get("bids", [])
+    asks = book.get("asks", [])
+
+    best_bid = None
+    if bids:
+        for lvl in bids:
+            p = to_number(lvl.get("price"))
+            if p is not None:
+                best_bid = max(best_bid, p) if best_bid is not None else p
+
+    best_ask = None
+    if asks:
+        for lvl in asks:
+            p = to_number(lvl.get("price"))
+            if p is not None:
+                best_ask = min(best_ask, p) if best_ask is not None else p
+
+    spread = best_ask - best_bid if best_bid is not None and best_ask is not None else None
+    bid_liquidity = sum(to_number(lvl.get("size")) or 0 for lvl in bids[:depth_levels])
+    ask_liquidity = sum(to_number(lvl.get("size")) or 0 for lvl in asks[:depth_levels])
+
+    return {
+        "bestBid": best_bid,
+        "bestAsk": best_ask,
+        "spread": spread,
+        "bidLiquidity": bid_liquidity,
+        "askLiquidity": ask_liquidity
+    }

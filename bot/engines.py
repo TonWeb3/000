@@ -37,14 +37,6 @@ def decide_ev(inputs: Dict[str, Any]) -> Dict[str, Any]:
     if price_up is None or price_down is None:
         return _no_ev("missing_prices")
 
-    # TIME GATE — never trade the degenerate end-of-window: in the last seconds the
-    # losing side collapses to dust prices (~0.001) and the model is near-certain, so
-    # it would "buy" a fortune of near-worthless shares on a fake edge.
-    time_left = inputs.get("timeLeftMin")
-    min_left = inputs.get("minMinutesLeft", 2.0)
-    if time_left is None or time_left < min_left:
-        return _no_ev(f"too_little_time_left_{time_left if time_left is None else round(time_left, 1)}")
-
     p_down = 1.0 - p_up
     ev_up = p_up - price_up
     ev_down = p_down - price_down
@@ -56,12 +48,6 @@ def decide_ev(inputs: Dict[str, Any]) -> Dict[str, Any]:
 
     min_prob = inputs.get("minProb", 0.55)
     ev_threshold = inputs.get("evThreshold", 0.04)
-    min_price = inputs.get("minPrice", 0.05)
-
-    # DUST-PRICE guard — a near-zero share with a giant implied "edge" is a stale/
-    # dust quote, not a real latency opportunity.
-    if price < min_price:
-        return _no_ev(f"price_{price:.3f}_below_min_{min_price:.2f}")
 
     # ── VETO filters — never chase a stretched move or trade into RSI extremes ──
     if side == "UP" and inputs.get("haExhaustedGreen"):

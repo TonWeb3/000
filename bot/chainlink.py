@@ -8,17 +8,6 @@ AGGREGATOR_ABI = [
     {"inputs": [], "name": "decimals", "outputs": [{"internalType": "uint8", "name": "", "type": "uint8"}], "stateMutability": "view", "type": "function"}
 ]
 
-# One AsyncWeb3 (and its internal aiohttp session) per RPC URL, reused across calls —
-# creating a new one per call leaks aiohttp sessions ("Unclosed client session").
-_ASYNC_W3_CACHE: Dict[str, AsyncWeb3] = {}
-
-def get_async_w3(rpc: str) -> AsyncWeb3:
-    w3 = _ASYNC_W3_CACHE.get(rpc)
-    if w3 is None:
-        w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc, request_kwargs={"timeout": 15.0}))
-        _ASYNC_W3_CACHE[rpc] = w3
-    return w3
-
 class ChainlinkFetcher:
     def __init__(self):
         self.cached_decimals = None
@@ -28,18 +17,15 @@ class ChainlinkFetcher:
         self.preferred_rpc_url = None
 
     def get_ordered_rpcs(self):
-        alchemy = [settings.alchemy_http()] if settings.alchemy_http() else []
         from_list = settings.POLYGON_RPC_URLS
         single = [settings.POLYGON_RPC_URL] if settings.POLYGON_RPC_URL else []
         defaults = [
-            "https://polygon-rpc.com",
-            "https://polygon-bor-rpc.publicnode.com",
             "https://polygon.drpc.org",
             "https://rpc.ankr.com/polygon",
             "https://1rpc.io/matic",
             "https://polygon.llamarpc.com"
         ]
-        all_rpcs = list(dict.fromkeys(alchemy + from_list + single + defaults))
+        all_rpcs = list(dict.fromkeys(from_list + single + defaults))
         if self.preferred_rpc_url and self.preferred_rpc_url in all_rpcs:
             all_rpcs.remove(self.preferred_rpc_url)
             return [self.preferred_rpc_url] + all_rpcs
@@ -57,7 +43,7 @@ class ChainlinkFetcher:
         aggregator_address = settings.CHAINLINK_BTC_USD_AGGREGATOR
         for rpc in rpcs:
             try:
-                w3 = get_async_w3(rpc)
+                w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc, request_kwargs={'timeout': 3.0}))
                 contract = w3.eth.contract(address=AsyncWeb3.to_checksum_address(aggregator_address), abi=AGGREGATOR_ABI)
 
                 if self.cached_decimals is None:

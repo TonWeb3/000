@@ -2,6 +2,9 @@
   "mode": "live",
   "paper_balance_usd": 1000,
   "private_key": "",
+  "relayer": {
+    "api_key": ""
+  },
   "polymarket": {
     "gamma_base_url": "https://gamma-api.polymarket.com",
     "clob_base_url": "https://clob.polymarket.com",
@@ -27,14 +30,13 @@
   },
   "flip": {
     "enabled": true,
-    "min_conviction": 0.60,
-    "min_minutes_left": 4
+    "min_conviction": 0.8,
+    "min_minutes_left": 9
   },
   "chainlink": {
-    "alchemy_api_key": "DfkvQ854X-Kg4-ytU2sG0",
     "polygon_rpc_url": "https://polygon.drpc.org",
     "polygon_wss_url": "wss://polygon-bor-rpc.publicnode.com",
-    "btc_usd_aggregator": "0xc907E116054Ad103354f2D350FD2514433D57F6f"
-  },
-  "wallet_address": ""
+    "btc_usd_aggregator": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
+    "alchemy_api_key": "DfkvQ854X-Kg4-ytU2sG0"
+  }
 }

@@ -8,11 +8,14 @@ class Settings(BaseSettings):
 
     MODE: str = "paper"  # "paper" or "live"
     PAPER_BALANCE_USD: float = 1000.0
-    PRIVATE_KEY: str = ""
+    PRIVATE_KEY: str = ""  # hex private key, or derived from a 12/24-word seed phrase
 
-    # Live trading (Polymarket CLOB). EOA only — the wallet is your own private key
-    # or seed phrase; the funder is auto-derived from it.
+    # Live trading (Polymarket CLOB V2). The wallet is derived from PRIVATE_KEY
+    # (hex key or seed phrase). New wallets trade via the gasless deposit-wallet
+    # flow (POLY_1271); the relayer key sponsors on-chain setup (deploy/approvals).
     CLOB_MAX_SLIPPAGE: float = 0.02  # marketable-limit buffer above the quote (probability units)
+    RELAYER_API_KEY: str = ""          # Polymarket relayer API key (gasless on-chain txs)
+    # The relayer key's owner address is the EOA — derived from PRIVATE_KEY automatically.
 
     # Polymarket on-chain contracts (Polygon) — used for EOA allowance setup
     USDC_ADDRESS: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -39,8 +42,6 @@ class Settings(BaseSettings):
     EV_THRESHOLD: float = 0.04          # require >= this expected value per $1 share (after price)
     MIN_PROB_EV: float = 0.55           # don't bet near-coinflips even if EV looks positive
     MIN_BOOK_LIQUIDITY_USD: float = 20.0  # skip if the ask side can't absorb the stake
-    ENTRY_MIN_MINUTES_LEFT: float = 2.0   # don't enter the degenerate end-of-window (dust books)
-    ENTRY_MIN_PRICE: float = 0.05         # don't buy near-worthless shares (dust / stale quotes)
 
     # Close-and-flip the open position on a strong opposite signal
     FLIP_ENABLED: bool = False
@@ -58,16 +59,16 @@ class Settings(BaseSettings):
     POLYMARKET_UP_LABEL: str = os.getenv("POLYMARKET_UP_LABEL", "Up")
     POLYMARKET_DOWN_LABEL: str = os.getenv("POLYMARKET_DOWN_LABEL", "Down")
 
-    # Alchemy (preferred Polygon RPC when set) — used for the Chainlink price socket
-    # and for live-trading transactions (allowances/orders). Just the API key.
-    ALCHEMY_API_KEY: str = os.getenv("ALCHEMY_API_KEY", "")
-
     # Chainlink
     POLYGON_RPC_URL: str = os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org")
     POLYGON_RPC_URLS: List[str] = [url.strip() for url in os.getenv("POLYGON_RPC_URLS", "").split(",") if url.strip()]
     POLYGON_WSS_URL: str = os.getenv("POLYGON_WSS_URL", "wss://polygon-bor-rpc.publicnode.com")
     POLYGON_WSS_URLS: List[str] = [url.strip() for url in os.getenv("POLYGON_WSS_URLS", "").split(",") if url.strip()]
     CHAINLINK_BTC_USD_AGGREGATOR: str = os.getenv("CHAINLINK_BTC_USD_AGGREGATOR", "0xc907E116054Ad103354f2D350FD2514433D57F6f")
+
+    # Alchemy — preferred Polygon RPC/WSS when an API key is set (used first, with
+    # the public RPCs kept as fallback). HTTP for reads/allowances, WSS for the feed.
+    ALCHEMY_API_KEY: str = os.getenv("ALCHEMY_API_KEY", "")
 
     CHAINLINK_AGGREGATORS: Dict[str, str] = {
         "BTC": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
@@ -83,18 +84,29 @@ class Settings(BaseSettings):
         if s.endswith("USDT"): s = s[:-4]
         return self.CHAINLINK_AGGREGATORS.get(s, self.CHAINLINK_BTC_USD_AGGREGATOR)
 
-    def alchemy_http(self) -> str:
-        k = (self.ALCHEMY_API_KEY or "").strip()
-        return f"https://polygon-mainnet.g.alchemy.com/v2/{k}" if k else ""
-
-    def alchemy_wss(self) -> str:
-        k = (self.ALCHEMY_API_KEY or "").strip()
-        return f"wss://polygon-mainnet.g.alchemy.com/v2/{k}" if k else ""
+    def alchemy_rpc_url(self) -> str:
+        # Polygon RPC used ONLY for the on-chain live-trading path (allowance approvals).
+        return f"https://polygon-mainnet.g.alchemy.com/v2/{self.ALCHEMY_API_KEY}" if self.ALCHEMY_API_KEY else ""
 
     # Proxy
     HTTP_PROXY: str = os.getenv("HTTP_PROXY", os.getenv("http_proxy", ""))
     HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", os.getenv("https_proxy", ""))
     ALL_PROXY: str = os.getenv("ALL_PROXY", os.getenv("all_proxy", ""))
+
+def normalize_private_key(secret: str) -> str:
+    """Accept either a raw hex private key or a 12/24-word seed phrase and return a
+    hex private key. EOA only — the wallet is derived from the secret, nothing else.
+    Returns "" for empty input. Raises if a seed phrase can't be parsed."""
+    secret = (secret or "").strip()
+    if not secret:
+        return ""
+    # A mnemonic is several space-separated words; a private key is a single token.
+    if len(secret.split()) >= 12:
+        from eth_account import Account
+        Account.enable_unaudited_hdwallet_features()
+        return Account.from_mnemonic(secret).key.hex()
+    return secret
+
 
 def load_settings():
     base_settings = Settings()
@@ -106,7 +118,11 @@ def load_settings():
 
             if "mode" in config_data: base_settings.MODE = config_data["mode"]
             if "paper_balance_usd" in config_data: base_settings.PAPER_BALANCE_USD = config_data["paper_balance_usd"]
-            if config_data.get("private_key"): base_settings.PRIVATE_KEY = config_data["private_key"]
+            if "private_key" in config_data: base_settings.PRIVATE_KEY = normalize_private_key(config_data["private_key"])
+
+            if "relayer" in config_data:
+                rl = config_data["relayer"]
+                if "api_key" in rl: base_settings.RELAYER_API_KEY = rl["api_key"]
 
             if "polymarket" in config_data:
                 poly = config_data["polymarket"]
@@ -133,8 +149,6 @@ def load_settings():
                 if "ev_threshold" in ev: base_settings.EV_THRESHOLD = float(ev["ev_threshold"])
                 if "min_prob" in ev: base_settings.MIN_PROB_EV = float(ev["min_prob"])
                 if "min_book_liquidity_usd" in ev: base_settings.MIN_BOOK_LIQUIDITY_USD = float(ev["min_book_liquidity_usd"])
-                if "entry_min_minutes_left" in ev: base_settings.ENTRY_MIN_MINUTES_LEFT = float(ev["entry_min_minutes_left"])
-                if "entry_min_price" in ev: base_settings.ENTRY_MIN_PRICE = float(ev["entry_min_price"])
 
             if "flip" in config_data:
                 flip = config_data["flip"]
@@ -144,10 +158,10 @@ def load_settings():
 
             if "chainlink" in config_data:
                 cl = config_data["chainlink"]
-                if "alchemy_api_key" in cl: base_settings.ALCHEMY_API_KEY = cl["alchemy_api_key"]
                 if "polygon_rpc_url" in cl: base_settings.POLYGON_RPC_URL = cl["polygon_rpc_url"]
                 if "polygon_wss_url" in cl: base_settings.POLYGON_WSS_URL = cl["polygon_wss_url"]
                 if "btc_usd_aggregator" in cl: base_settings.CHAINLINK_BTC_USD_AGGREGATOR = cl["btc_usd_aggregator"]
+                if "alchemy_api_key" in cl: base_settings.ALCHEMY_API_KEY = cl["alchemy_api_key"]
 
         except Exception as e:
             print(f"Warning: Failed to load config.json: {e}")

@@ -20,48 +20,37 @@
     <div class="max-w-6xl mx-auto">
         <header class="flex flex-col sm:flex-row justify-between items-center mb-6 sm:mb-8 gap-4">
             <h1 class="text-2xl sm:text-3xl font-bold text-blue-400" x-text="(data.trading_state?.symbol || 'BTC') + ' 15m Assistant'"></h1>
-            <div class="flex flex-wrap justify-center sm:justify-end items-center gap-2 sm:gap-3">
-                <!-- Live balance (always shown) -->
-                <div class="bg-gray-800 border border-green-700/40 px-3 py-1.5 rounded-lg flex items-center gap-2">
-                    <span class="text-[9px] sm:text-[10px] text-gray-500 uppercase font-bold tracking-wider">Balance · <span :class="statusMode === 'live' ? 'text-red-400' : 'text-yellow-400'" x-text="(statusMode || 'paper').toUpperCase()"></span></span>
-                    <span class="text-sm sm:text-lg font-bold font-mono text-green-400" x-text="balance != null ? ('$' + balance.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})) : '—'"></span>
-                </div>
-
-                <!-- Start / Stop -->
-                <button @click="running ? stopBot() : startBot()" :disabled="botBusy"
-                        :class="running ? 'bg-red-600 hover:bg-red-500' : 'bg-green-600 hover:bg-green-500'"
-                        class="px-4 py-1.5 rounded-lg font-bold text-xs sm:text-sm text-white transition disabled:opacity-60 flex items-center justify-center gap-2 min-w-[104px]">
-                    <template x-if="botBusy">
-                        <span class="flex items-center gap-2">
-                            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-                            </svg>
-                            <span x-text="running ? 'Stopping…' : 'Starting…'"></span>
-                        </span>
-                    </template>
-                    <template x-if="!botBusy">
-                        <span x-text="running ? '■ Stop' : '▶ Start'"></span>
-                    </template>
-                </button>
-
-                <!-- Running status pill -->
-                <span :class="running ? 'bg-green-900/40 text-green-400 border-green-700/50' : 'bg-gray-800 text-gray-500 border-gray-700'"
-                      class="px-2.5 py-1 rounded-full text-[9px] sm:text-[10px] font-bold uppercase border flex items-center gap-1.5">
-                    <span :class="running ? 'bg-green-400 animate-pulse' : 'bg-gray-600'" class="w-1.5 h-1.5 rounded-full"></span>
-                    <span x-text="running ? 'Scanning' : 'Stopped'"></span>
-                </span>
-
-                <div class="flex items-center space-x-2 text-[10px] sm:text-xs">
+            <div class="flex space-x-2 sm:space-x-4 items-center">
+                <div class="flex items-center space-x-2 text-[10px] sm:text-xs mr-2 sm:mr-4">
                     <div class="flex items-center">
                         <div :class="data.prices?.spot ? 'bg-green-500' : 'bg-red-500'" class="w-2 h-2 rounded-full mr-1"></div>
-                        <span class="text-gray-400">Binance</span>
+                        <span class="text-gray-400">Binance WS</span>
                     </div>
                     <div class="flex items-center">
                         <div :class="data.prices?.chainlink ? 'bg-green-500' : 'bg-red-500'" class="w-2 h-2 rounded-full mr-1"></div>
-                        <span class="text-gray-400">Poly</span>
+                        <span class="text-gray-400">Poly WS</span>
                     </div>
                 </div>
+                <!-- Live balance: label switches with mode (Paper vs Live) -->
+                <div class="flex flex-col items-end leading-tight">
+                    <span class="text-[9px] sm:text-[10px] text-gray-500 uppercase tracking-wider"
+                          x-text="(data.trading_state?.mode === 'live' ? 'Live' : 'Paper') + ' Balance'"></span>
+                    <span class="text-base sm:text-xl font-bold font-mono"
+                          :class="data.trading_state?.mode === 'live' ? 'text-emerald-400' : 'text-yellow-400'"
+                          x-text="'$' + (data.trading_state?.balance != null ? Number(data.trading_state.balance).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '-')"></span>
+                </div>
+
+                <!-- Start / Stop trading -->
+                <button @click="running ? stopBot() : startBot()" :disabled="botBusy"
+                        class="flex items-center gap-1.5 px-3 sm:px-5 py-2 rounded-lg font-bold uppercase text-[10px] sm:text-xs transition disabled:opacity-60 disabled:cursor-not-allowed"
+                        :class="running ? 'bg-red-600 hover:bg-red-500' : 'bg-green-600 hover:bg-green-500'">
+                    <svg x-show="botBusy" class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                    </svg>
+                    <span x-text="botBusy ? (running ? 'Stopping…' : 'Starting…') : (running ? '■ Stop' : '▶ Start')"></span>
+                </button>
+
                 <a href="/settings" class="text-gray-400 hover:text-white transition p-2">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -69,14 +58,10 @@
                     </svg>
                 </a>
                 <span :class="data.trading_state?.mode === 'paper' ? 'bg-yellow-600' : 'bg-red-600'"
-                      class="px-3 py-1 rounded-full font-bold uppercase text-[10px] sm:text-xs" x-text="data.trading_state?.mode || statusMode"></span>
+                      class="px-3 py-1 rounded-full font-bold uppercase text-[10px] sm:text-xs" x-text="data.trading_state?.mode"></span>
+                <span class="bg-gray-800 px-3 py-1 rounded text-gray-400 text-[10px] sm:text-xs" x-text="'Updated: ' + lastUpdate"></span>
             </div>
         </header>
-
-        <!-- Stopped banner -->
-        <div x-show="!running" x-transition class="mb-4 bg-yellow-900/20 border border-yellow-700/40 text-yellow-300 text-xs sm:text-sm rounded-lg px-4 py-2 text-center">
-            Bot is stopped. Click <span class="font-bold">▶ Start</span> to begin scanning for trading opportunities.
-        </div>
 
         <!-- Market Summary -->
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">
@@ -101,8 +86,8 @@
                 </div>
             </div>
             <div class="bg-gray-800 p-4 sm:p-6 rounded-lg shadow-lg border-l-4 border-purple-500 sm:col-span-2 lg:col-span-1">
-                <p class="text-gray-400 text-xs sm:text-sm uppercase">Time Remaining</p>
-                <h2 class="text-2xl sm:text-3xl font-mono" x-text="formatCountdown(remainingSec)"></h2>
+                <p class="text-gray-400 text-xs sm:text-sm uppercase" x-text="'Time Remaining (' + (data.analysis?.decision?.phase || '-') + ')'"></p>
+                <h2 class="text-2xl sm:text-3xl font-mono" x-text="formatTime(data.timing?.remainingMinutes)"></h2>
             </div>
         </div>
 
@@ -191,7 +176,7 @@
                 <div x-show="tab === 'active'">
                     <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-2">
                         <h3 class="text-lg sm:text-xl font-bold">Session Balance</h3>
-                        <span class="text-xl sm:text-2xl font-bold text-green-500" x-text="balance != null ? ('$' + balance.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})) : '—'"></span>
+                        <span class="text-xl sm:text-2xl font-bold text-green-500" x-text="'$' + (data.trading_state?.balance?.toLocaleString() || '1,000')"></span>
                     </div>
                     <div class="overflow-x-auto -mx-4 sm:mx-0">
                         <table class="w-full text-left min-w-[500px] sm:min-w-0">
@@ -284,67 +269,78 @@
                 tradeHistory: [],
                 running: false,
                 botBusy: false,
-                balance: null,
-                statusMode: 'paper',
-                nowMs: Date.now(),
-                wsConnected: false,
+                suppressSyncUntil: 0,
                 init() {
-                    this.connectWS();
-                    // High-frequency local clock — drives the smooth countdown independently
-                    // of when data arrives, so Time Remaining ticks every fraction of a second.
-                    setInterval(() => { this.nowMs = Date.now(); }, 200);
+                    this.refresh();
+                    setInterval(() => this.refresh(), 1000);
+                    setInterval(() => this.refreshLogs(), 2000);
                 },
-                connectWS() {
-                    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-                    let ws;
-                    try { ws = new WebSocket(`${proto}://${location.host}/ws`); }
-                    catch (e) { setTimeout(() => this.connectWS(), 1500); return; }
-                    ws.onopen = () => { this.wsConnected = true; };
-                    ws.onmessage = (ev) => {
-                        let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-                        if (m.latest) this.data = m.latest;
-                        if (m.status) {
-                            if (!this.botBusy) this.running = m.status.running;
-                            this.balance = m.status.balance;
-                            this.statusMode = m.status.mode;
-                        }
-                        if (m.logs) this.logs = m.logs.slice().reverse();
-                        if (m.history) this.tradeHistory = m.history.slice().reverse();
+                async refresh() {
+                    try {
+                        const response = await fetch('/api/latest');
+                        this.data = await response.json();
                         this.lastUpdate = new Date().toLocaleTimeString();
-                    };
-                    ws.onclose = () => { this.wsConnected = false; setTimeout(() => this.connectWS(), 1500); };
-                    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+                        // Keep the button in sync with the server, but not while a click is
+                        // in flight or just after one (the server's /api/latest lags ~1s
+                        // behind the start/stop flag, which would otherwise flicker the button).
+                        if (!this.botBusy && Date.now() > this.suppressSyncUntil && this.data.trading_state?.running != null) {
+                            this.running = !!this.data.trading_state.running;
+                        }
+
+                        if (this.tab === 'history') {
+                            const hRes = await fetch('/history');
+                            const history = await hRes.json();
+                            this.tradeHistory = history.reverse();
+                        }
+                    } catch (e) {
+                        console.error("Refresh failed", e);
+                    }
+                },
+                async refreshLogs() {
+                    if (this.tab !== 'logs') return;
+                    try {
+                        const response = await fetch('/api/logs');
+                        const logs = await response.json();
+                        this.logs = logs.reverse();
+                    } catch (e) {}
                 },
                 async startBot() {
+                    if (this.botBusy) return;            // ignore double-clicks
                     this.botBusy = true;
+                    this.running = true;                  // optimistic — reflect intent immediately
+                    this.suppressSyncUntil = Date.now() + 3000;
                     try {
-                        const r = await fetch('/api/start', { method: 'POST' });
-                        const s = await r.json();
-                        this.running = !!s.running;
-                    } catch (e) {}
+                        const res = await fetch('/api/start', { method: 'POST' });
+                        const d = await res.json();
+                        this.running = !!d.running;
+                    } catch (e) {
+                        console.error('Start failed', e);
+                        this.running = false;
+                    }
+                    this.suppressSyncUntil = Date.now() + 3000;
                     this.botBusy = false;
                 },
                 async stopBot() {
+                    if (this.botBusy) return;
                     this.botBusy = true;
+                    this.running = false;                 // optimistic
+                    this.suppressSyncUntil = Date.now() + 3000;
                     try {
-                        const r = await fetch('/api/stop', { method: 'POST' });
-                        const s = await r.json();
-                        this.running = !!s.running;
-                    } catch (e) {}
+                        const res = await fetch('/api/stop', { method: 'POST' });
+                        const d = await res.json();
+                        this.running = !!d.running;
+                    } catch (e) {
+                        console.error('Stop failed', e);
+                        this.running = true;
+                    }
+                    this.suppressSyncUntil = Date.now() + 3000;
                     this.botBusy = false;
                 },
-                // Seconds left in the current 15-min window. Uses the server's window end
-                // when fresh, else the clock-aligned local window — always live and smooth.
-                get remainingSec() {
-                    const w = 15 * 60 * 1000;
-                    const serverEnd = this.data?.timing?.endMs;
-                    const end = (serverEnd && serverEnd > this.nowMs) ? serverEnd : (Math.floor(this.nowMs / w) * w + w);
-                    return Math.max(0, (end - this.nowMs) / 1000);
-                },
-                formatCountdown(sec) {
-                    if (sec == null) return '--:--';
-                    sec = Math.max(0, Math.floor(sec));
-                    const m = Math.floor(sec / 60), s = sec % 60;
+                formatTime(mins) {
+                    if (!mins && mins !== 0) return '--:--';
+                    const totalSecs = Math.max(0, Math.floor(mins * 60));
+                    const m = Math.floor(totalSecs / 60);
+                    const s = totalSecs % 60;
                     return m.toString().padStart(2, '0') + ':' + s.toString().padStart(2, '0');
                 }
             }

@@ -218,23 +218,15 @@ class ChainlinkPriceStream:
         self.last_price = None
         self.last_updated_at = None
         self.closed = False
-
-    def _wss_urls(self):
-        # Alchemy first when configured (re-read live so a saved key applies on reconnect).
-        alchemy = [settings.alchemy_wss()] if settings.alchemy_wss() else []
-        return list(dict.fromkeys(alchemy + settings.POLYGON_WSS_URLS + ([settings.POLYGON_WSS_URL] if settings.POLYGON_WSS_URL else [])))
+        self.wss_urls = settings.POLYGON_WSS_URLS + ([settings.POLYGON_WSS_URL] if settings.POLYGON_WSS_URL else [])
 
     async def start(self):
-        if not self.aggregator:
+        if not self.wss_urls or not self.aggregator:
             return
 
         url_idx = 0
         while not self.closed:
-            urls = self._wss_urls()
-            if not urls:
-                await asyncio.sleep(2)
-                continue
-            url = urls[url_idx % len(urls)]
+            url = self.wss_urls[url_idx % len(self.wss_urls)]
             url_idx += 1
             try:
                 proxy = get_proxy_url_for(url)
@@ -283,117 +275,6 @@ class ChainlinkPriceStream:
 
     def get_last(self):
         return {"price": self.last_price, "updatedAt": self.last_updated_at, "source": "chainlink_ws"}
-
-    def close(self):
-        self.closed = True
-
-
-class PolymarketClobStream:
-    """Real-time Polymarket order books via the CLOB 'market' channel.
-
-    Subscribes to the active market's UP/DOWN token IDs and maintains an L2 book
-    per token from the initial `book` snapshot plus `price_change` deltas. Exposes
-    the best bid/ask and top-of-book liquidity, so the bot reads live prices and
-    depth from a socket instead of polling the CLOB REST endpoints. Re-subscribes
-    (reconnects) whenever the active token set changes — i.e. each 15-min rotation.
-    """
-    WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-
-    def __init__(self):
-        self.assets: List[str] = []                 # token IDs currently tracked
-        self.books: Dict[str, Dict] = {}            # token_id -> {"bids": {px:sz}, "asks": {px:sz}}
-        self.closed = False
-
-    def set_assets(self, token_ids: List[str]):
-        new = [str(t) for t in token_ids if t]
-        if set(new) != set(self.assets):
-            self.assets = new
-            # keep any books we already have for still-tracked tokens
-            self.books = {t: self.books.get(t, {"bids": {}, "asks": {}}) for t in new}
-
-    async def start(self):
-        while not self.closed:
-            assets = list(self.assets)
-            if not assets:
-                await asyncio.sleep(0.5)
-                continue
-            try:
-                proxy = get_proxy_url_for(self.WS_URL)
-                async with aiohttp.ClientSession() as session:
-                    async with session.ws_connect(self.WS_URL, proxy=proxy if proxy else None, heartbeat=10) as ws:
-                        await ws.send_json({"assets_ids": assets, "type": "market"})
-                        print(f"Connected to Polymarket CLOB WS ({len(assets)} assets)")
-                        while not self.closed:
-                            if set(self.assets) != set(assets):
-                                break  # market rotated — reconnect with the new tokens
-                            try:
-                                msg = await asyncio.wait_for(ws.receive(), timeout=2)
-                            except asyncio.TimeoutError:
-                                continue
-                            if msg.type == aiohttp.WSMsgType.TEXT:
-                                self._handle(msg.data)
-                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                                break
-            except Exception as e:
-                print(f"WS Error (Polymarket CLOB): {e}")
-                if not self.closed:
-                    await asyncio.sleep(2)
-
-    def _handle(self, raw: str):
-        try:
-            data = json.loads(raw)
-        except Exception:
-            return
-        items = data if isinstance(data, list) else [data]
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            et = it.get("event_type")
-            if et == "book":
-                aid = it.get("asset_id")
-                if not aid:
-                    continue
-                self.books[aid] = {
-                    "bids": {float(b["price"]): float(b["size"]) for b in it.get("bids", []) if b.get("price") is not None},
-                    "asks": {float(a["price"]): float(a["size"]) for a in it.get("asks", []) if a.get("price") is not None},
-                }
-            elif et == "price_change":
-                for ch in (it.get("changes") or []):
-                    self._apply_change(ch)
-
-    def _apply_change(self, ch: Dict):
-        aid = ch.get("asset_id")
-        if not aid:
-            return
-        try:
-            price = float(ch["price"]); size = float(ch["size"])
-        except Exception:
-            return
-        bk = self.books.setdefault(aid, {"bids": {}, "asks": {}})
-        side = bk["bids"] if (ch.get("side") or "").upper() == "BUY" else bk["asks"]
-        if size <= 0:
-            side.pop(price, None)
-        else:
-            side[price] = size
-
-    def get_summary(self, token_id: str, depth: int = 5) -> Dict:
-        bk = self.books.get(str(token_id))
-        if not bk:
-            return {"bestBid": None, "bestAsk": None, "spread": None, "bidLiquidity": None, "askLiquidity": None}
-        bids, asks = bk["bids"], bk["asks"]
-        best_bid = max(bids) if bids else None
-        best_ask = min(asks) if asks else None
-        spread = (best_ask - best_bid) if (best_bid is not None and best_ask is not None) else None
-        bid_liq = sum(sz for _, sz in sorted(bids.items(), key=lambda x: -x[0])[:depth]) if bids else 0
-        ask_liq = sum(sz for _, sz in sorted(asks.items(), key=lambda x: x[0])[:depth]) if asks else 0
-        return {"bestBid": best_bid, "bestAsk": best_ask, "spread": spread, "bidLiquidity": bid_liq, "askLiquidity": ask_liq}
-
-    def get_buy_price(self, token_id: str):
-        """The price to BUY this token = the best ask. None if no asks are resting."""
-        bk = self.books.get(str(token_id))
-        if not bk or not bk["asks"]:
-            return None
-        return min(bk["asks"])
 
     def close(self):
         self.closed = True
