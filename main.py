@@ -387,11 +387,12 @@ async def update_trades(current_prices: Dict[str, Any]):
     trades_changed = False
     now_ts = time.time()
 
-    # Freshest price to settle against. Strike is the Binance 5m open (target_open),
-    # so prefer spot (Binance) to avoid a Binance/Chainlink offset flipping a
-    # near-the-money result; fall back to the chainlink feed.
+    # Rolling price snapshot kept ONLY for the record on each trade. Win/loss is
+    # decided exclusively by Polymarket's authoritative resolution below — never by
+    # this price (the bot's Binance feed/strike differ from Polymarket's Chainlink
+    # resolution and would mislabel near-the-money trades).
     cur_price = current_prices.get("spot") or current_prices.get("chainlink")
-    SETTLEMENT_GRACE_SECONDS = 300  # if still unresolvable this long past expiry, void it
+    SETTLEMENT_GRACE_SECONDS = 600  # wait this long for Polymarket to resolve, then void
 
     for trade in state["active_trades"]:
         # Keep a rolling price snapshot so settlement always has a recent value,
@@ -441,8 +442,13 @@ async def update_trades(current_prices: Dict[str, Any]):
         up_index = next((i for i, x in enumerate(outcomes) if x.lower() == settings.POLYMARKET_UP_LABEL.lower()), 0)
         down_index = next((i for i, x in enumerate(outcomes) if x.lower() == settings.POLYMARKET_DOWN_LABEL.lower()), 1)
 
+        # AUTHORITATIVE resolution ONLY: the resolved Polymarket outcome trades at ~$1,
+        # which equals the on-chain payout — the single source of truth for win/loss.
+        # We deliberately do NOT infer the result from spot-vs-strike: the bot's strike
+        # (Binance 5m open at entry) and its spot feed differ from Polymarket's
+        # Chainlink-based resolution, so a price guess can mislabel a loss as a win.
+        # If Polymarket hasn't resolved yet, we keep waiting (below) instead of guessing.
         winning_index = -1
-        # 1) Authoritative: a settled Polymarket outcome trades at ~$1.
         for i, p in enumerate(outcome_prices):
             try:
                 if float(p) > 0.9:
@@ -451,13 +457,8 @@ async def update_trades(current_prices: Dict[str, Any]):
             except Exception:
                 pass
 
-        # 2) Fallback once the window/market is over: settlement price vs strike.
+        # Snapshot a settlement price for the record only (never used to decide win/loss).
         settlement_price = trade.get("settlement_price_at_expiry") or trade.get("last_price") or cur_price
-        if winning_index == -1 and (expired or market_closed):
-            strike = trade.get("strike_price")
-            if strike and settlement_price:
-                trade["settlement_price_at_expiry"] = settlement_price
-                winning_index = up_index if settlement_price > strike else down_index
 
         # ---- Could not resolve yet ----
         if winning_index == -1:
@@ -469,15 +470,17 @@ async def update_trades(current_prices: Dict[str, Any]):
             if now_ts - first_seen < SETTLEMENT_GRACE_SECONDS:
                 remaining_active.append(trade)
                 continue
-            # Grace exhausted — void so a single bad trade can't block forever.
+            # Grace exhausted — Polymarket never published a resolution we could read.
+            # Void our tracking so one stuck trade can't block forever. We do NOT guess
+            # win/loss from price.
             trade["status"] = "VOID"
             trade["exit_time"] = datetime.now().isoformat()
             trade["profit_loss"] = 0.0
             if trade.get("mode", "paper") == "paper":
-                state["paper_balance"] += trade["amount"]  # refund the stake
-            state["trade_history"].append(trade)
-            trades_changed = True
-            log_message(f"VOID: Trade for {trade['market_slug']} unresolved past grace; stake refunded (paper).")
+                state["paper_balance"] += trade["amount"]  # refund the simulated stake
+                log_message(f"VOID: {trade['market_slug']} unresolved past grace; paper stake refunded.")
+            else:
+                log_message(f"VOID: {trade['market_slug']} not resolved by Polymarket within grace; the live balance reflects the actual on-chain settlement.")
             continue
 
         # ---- Settle WIN / LOSS ----
