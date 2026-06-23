@@ -227,9 +227,16 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
     if decision["action"] != "ENTER":
         return decision.get("reason", "no_trade")
 
-    # CONSTRAINT: Only one position at a time
-    if state["active_trades"]:
+    # CONSTRAINT: one *running* position at a time. A trade whose 15m window has
+    # already ended (now only awaiting Polymarket's resolution) no longer blocks a new
+    # entry — the next market is already live, so we can trade it while the old one
+    # settles in the background.
+    now_ts = time.time()
+    if any(now_ts < (t.get("end_ts") or float("inf")) for t in state["active_trades"]):
         return "slot_busy"
+    # Never hold two positions in the same market (running or still settling).
+    if any(str(t.get("market_id")) == str(market.get("id")) for t in state["active_trades"]):
+        return "market_busy"
 
     side = decision["side"]
 
@@ -348,11 +355,14 @@ async def maybe_flip_position(decision: Dict[str, Any], poly_snapshot: Dict[str,
     token_ids = poly_snapshot.get("token_ids", {})
     orderbook = poly_snapshot.get("orderbook", {})
 
-    trade = state["active_trades"][0]
-    if trade["side"] == new_side:
-        return  # already on the signalled side
-    if str(trade.get("market_id")) != str(market.get("id")):
-        return  # different market — let the old one settle on its own
+    # Flip only the currently-RUNNING position in THIS market. Trades from past
+    # markets that are merely awaiting resolution are left alone to settle.
+    now_ts = time.time()
+    trade = next((t for t in state["active_trades"]
+                  if str(t.get("market_id")) == str(market.get("id"))
+                  and now_ts < (t.get("end_ts") or float("inf"))), None)
+    if trade is None or trade["side"] == new_side:
+        return  # nothing running here, or already on the signalled side
 
     held_key = "up" if trade["side"] == "UP" else "down"
     ob = orderbook.get(held_key) or {}
@@ -462,6 +472,7 @@ async def update_trades(current_prices: Dict[str, Any]):
 
         # ---- Could not resolve yet ----
         if winning_index == -1:
+            trade["status"] = "AWAITING"  # window over, waiting on Polymarket; does not block new entries
             first_seen = trade.get("unresolved_since")
             if first_seen is None:
                 trade["unresolved_since"] = now_ts
