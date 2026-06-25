@@ -713,14 +713,10 @@ async def update_loop():
                 "haExhaustedRed": ha_exhausted_red,
             })
 
-            # Raw EV-favoured side + its fair probability (NO HA/RSI vetoes) — drives flips.
-            fav_side = None
-            fav_prob = None
-            if market_up is not None and market_down is not None:
-                ev_up = fair_up - market_up
-                ev_down = (1.0 - fair_up) - market_down
-                fav_side = "UP" if ev_up >= ev_down else "DOWN"
-                fav_prob = fair_up if fav_side == "UP" else (1.0 - fair_up)
+            # Flip side chosen PURELY by the model's fair probability (fair_prob_up) —
+            # NO EV / market price. (EV would let a tiny-edge flip through and ruin it.)
+            fav_side = "UP" if fair_up >= 0.5 else "DOWN"
+            fav_prob = fair_up if fav_side == "UP" else (1.0 - fair_up)
 
             current_prices_dict = {"spot": spot_price, "chainlink": current_price}
 
