@@ -30,8 +30,8 @@
   },
   "flip": {
     "enabled": true,
-    "min_conviction": 0.6,
-    "min_minutes_left": 4
+    "min_conviction": 0.8,
+    "min_minutes_left": 9
   },
   "chainlink": {
     "polygon_rpc_url": "https://polygon.drpc.org",
