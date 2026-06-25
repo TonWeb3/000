@@ -241,8 +241,13 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
     if any(str(t.get("market_id")) == str(market.get("id")) for t in state["active_trades"]):
         return "market_busy"
 
-    side = decision["side"]
+    return await _open_position(decision["side"], market_prices, market, target_open, token_ids, orderbook)
 
+
+async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[str, Any], target_open: float, token_ids: Dict[str, Any], orderbook: Optional[Dict[str, Any]] = None):
+    # Open a fresh position on `side`: sizing, liquidity trim, and paper/live execution.
+    # Entry GATES (the decide_ev signal, slot/market-busy) are the caller's responsibility
+    # — a flip reuses this to open the opposite side unconditionally.
     price = market_prices["up"] if side == "UP" else market_prices["down"]
     if price is None:
         return "no_price"
@@ -335,23 +340,22 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
             log_message(f"LIVE trade FAILED ({side}): {result.get('error')}")
             return "live_order_failed"
 
-async def maybe_flip_position(decision: Dict[str, Any], poly_snapshot: Dict[str, Any], time_left_min: Optional[float]):
-    """Close the open position early and flip when a STRONG opposite signal appears.
-
-    Opt-in (FLIP_ENABLED). Guards: the new side must clear FLIP_MIN_CONVICTION and at
-    least FLIP_MIN_MINUTES_LEFT must remain, and we only flip within the same market.
-    After closing here, execute_trade() opens the new side (slot is now free).
+async def maybe_flip_position(fav_side: Optional[str], fav_prob: Optional[float], poly_snapshot: Dict[str, Any], target_open: float, time_left_min: Optional[float]):
+    """Close the running position and flip to the OPPOSITE side late in the window.
+    No HA/RSI vetoes. Two gates only: the favoured side's fair probability must be
+    >= FLIP_MIN_CONVICTION, and there must be LESS than FLIP_MIN_MINUTES_LEFT remaining
+    (i.e. flips fire only near the window's end). FLIP_ENABLED is the master switch.
+    (Fresh entries still go through the gated execute_trade.)
     """
     if not settings.FLIP_ENABLED:
         return
-    if decision.get("action") != "ENTER" or not state["active_trades"]:
+    if fav_side is None or not state["active_trades"]:
         return
-
-    new_side = decision["side"]
-    new_prob = decision.get("prob", 0) or 0
-    if new_prob < settings.FLIP_MIN_CONVICTION:
+    # Conviction gate: only flip into a side the model is at least this sure of.
+    if (fav_prob or 0) < settings.FLIP_MIN_CONVICTION:
         return
-    if time_left_min is not None and time_left_min < settings.FLIP_MIN_MINUTES_LEFT:
+    # Late-window only: flip only once LESS than FLIP_MIN_MINUTES_LEFT remains.
+    if time_left_min is not None and time_left_min >= settings.FLIP_MIN_MINUTES_LEFT:
         return
 
     market = poly_snapshot["market"]
@@ -365,8 +369,8 @@ async def maybe_flip_position(decision: Dict[str, Any], poly_snapshot: Dict[str,
     trade = next((t for t in state["active_trades"]
                   if str(t.get("market_id")) == str(market.get("id"))
                   and now_ts < (t.get("end_ts") or float("inf"))), None)
-    if trade is None or trade["side"] == new_side:
-        return  # nothing running here, or already on the signalled side
+    if trade is None or trade["side"] == fav_side:
+        return  # nothing running here, or already on the favoured side
 
     held_key = "up" if trade["side"] == "UP" else "down"
     ob = orderbook.get(held_key) or {}
@@ -394,7 +398,12 @@ async def maybe_flip_position(decision: Dict[str, Any], poly_snapshot: Dict[str,
     state["active_trades"] = [t for t in state["active_trades"] if t is not trade]
     state["last_trade_side"] = None
     save_state()
-    log_message(f"FLIP: closed {trade['side']} @ {exit_price:.2f} (P/L ${trade['profit_loss']:.2f}); opening {new_side}")
+    log_message(f"FLIP: closed {trade['side']} @ {exit_price:.2f} (P/L ${trade['profit_loss']:.2f}); opening {fav_side}")
+
+    # Open the opposite side immediately — the slot is now free. Done here (not via the
+    # gated execute_trade) so the flip happens even when the entry signal is vetoed.
+    open_result = await _open_position(fav_side, prices, market, target_open, token_ids, orderbook)
+    log_message(f"FLIP: open {fav_side} -> {open_result}")
 
 async def update_trades(current_prices: Dict[str, Any]):
     remaining_active = []
@@ -704,13 +713,22 @@ async def update_loop():
                 "haExhaustedRed": ha_exhausted_red,
             })
 
+            # Raw EV-favoured side + its fair probability (NO HA/RSI vetoes) — drives flips.
+            fav_side = None
+            fav_prob = None
+            if market_up is not None and market_down is not None:
+                ev_up = fair_up - market_up
+                ev_down = (1.0 - fair_up) - market_down
+                fav_side = "UP" if ev_up >= ev_down else "DOWN"
+                fav_prob = fair_up if fav_side == "UP" else (1.0 - fair_up)
+
             current_prices_dict = {"spot": spot_price, "chainlink": current_price}
 
             # Trading actions only fire when the user has pressed Start. Data, prices
             # and the dashboard keep updating regardless so the balance view stays live.
             exec_result = None
             if poly_snapshot["ok"] and state["running"]:
-                await maybe_flip_position(decision, poly_snapshot, time_left_min)
+                await maybe_flip_position(fav_side, fav_prob, poly_snapshot, target_open, time_left_min)
                 exec_result = await execute_trade(decision, poly_snapshot["prices"], poly_snapshot["market"], target_open, poly_snapshot.get("token_ids", {}), poly_snapshot.get("orderbook", {}))
             elif not state["running"]:
                 exec_result = "stopped"

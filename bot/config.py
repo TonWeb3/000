@@ -43,10 +43,10 @@ class Settings(BaseSettings):
     MIN_PROB_EV: float = 0.55           # don't bet near-coinflips even if EV looks positive
     MIN_BOOK_LIQUIDITY_USD: float = 20.0  # skip if the ask side can't absorb the stake
 
-    # Close-and-flip the open position on a strong opposite signal
+    # Close-and-flip the open position to the opposite side, late in the window.
     FLIP_ENABLED: bool = False
-    FLIP_MIN_CONVICTION: float = 0.80   # opposite side's adjusted prob must be >= this
-    FLIP_MIN_MINUTES_LEFT: float = 9.0  # and at least this much time left in the window
+    FLIP_MIN_CONVICTION: float = 0.60   # opposite side's fair prob must be >= this to flip
+    FLIP_MIN_MINUTES_LEFT: float = 4.0  # only flip once LESS than this many minutes remain
 
     RSI_PERIOD: int = 14
 
