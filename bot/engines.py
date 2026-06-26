@@ -1,68 +1,70 @@
 from typing import Dict, Any
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Latency-arb entry engine.
-#
-#  Backtest verdict: the model has NO predictive edge over the trivial "is spot
-#  already above the 15m open?" baseline — that signal is fully priced by the
-#  market. The only edge left is LATENCY: act on a Binance spot move before
-#  Polymarket's thin book reprices.
-#
-#  The decision is purely a fast fair probability (from Binance spot) vs the
-#  market's implied price. Enter when the gap (expected value) is large enough
-#  that the book looks stale. RSI and Heiken-Ashi survive only as veto filters.
+#  Entry engine: 5m HA trend + fresh 1m HA momentum + RSI(50) confirm pick the
+#  DIRECTION; EV (fair vs market ask) finds the price. See decide_entry below.
 # ─────────────────────────────────────────────────────────────────────────────
-
-EXHAUSTION_BARS = 6  # a Heiken-Ashi streak this long is over-extended → veto chasing it
 
 
 def _no_ev(reason: str) -> Dict[str, Any]:
-    return {"action": "NO_TRADE", "side": None, "phase": "EV", "strength": "EV", "reason": reason}
+    return {"action": "NO_TRADE", "side": None, "phase": "TREND_EV", "strength": "EV", "reason": reason}
 
 
-def decide_ev(inputs: Dict[str, Any]) -> Dict[str, Any]:
-    """EV gate: fair probability (Binance) vs market ask price (Polymarket).
+def decide_entry(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """Trend (5m HA) + fresh momentum (1m HA) set the DIRECTION; EV finds the price.
 
-    EV_side = p_side - ask_price_side. A positive EV beyond `evThreshold` means the
-    book is underpricing the side our fast feed already favours — the latency edge.
-    RSI / Heiken-Ashi are veto filters only; they do NOT distort the probability.
-    Position sizing (percent/fixed of balance) is handled by the caller.
+    - 5m HA colour = the trend. Red -> only DOWN, green -> only UP.
+    - 1m HA must be the SAME colour (momentum aligned with the trend) and its streak
+      must be FRESH: between freshMin and freshMax bars (a new move, 1..6 by default —
+      not a stale, over-extended run).
+    - RSI confirms the trend at the 50 line: >= 50 = uptrend (allows UP), < 50 =
+      downtrend (allows DOWN).
+    - Then EV on that side (fair - ask price) must clear evThreshold, i.e. the book is
+      giving a good price to enter the trend. fair prob must also be >= minProb.
+
+    HA, RSI(50) and EV are EQUAL, MANDATORY gates — all three must agree to enter; none
+    overrides another. HA picks WHICH way, RSI(50) confirms it, EV picks WHEN/at what price.
     """
+    ha5 = inputs.get("ha5Color")          # "green" / "red" / None  (trend)
+    ha1 = inputs.get("ha1Color")          # "green" / "red" / None  (momentum)
+    streak1 = inputs.get("ha1Streak") or 0
     p_up = inputs.get("mcProbUp")
-    price_up = inputs.get("priceUp")     # ask (buy) price for the UP share, 0..1
-    price_down = inputs.get("priceDown") # ask (buy) price for the DOWN share, 0..1
+    price_up = inputs.get("priceUp")
+    price_down = inputs.get("priceDown")
+    fresh_min = inputs.get("freshMin", 1)
+    fresh_max = inputs.get("freshMax", 6)
+    min_prob = inputs.get("minProb", 0.55)
+    ev_threshold = inputs.get("evThreshold", 0.04)
 
     if p_up is None:
         return _no_ev("missing_model_data")
     if price_up is None or price_down is None:
         return _no_ev("missing_prices")
 
-    p_down = 1.0 - p_up
-    ev_up = p_up - price_up
-    ev_down = p_down - price_down
+    # ── TREND (5m HA) ──
+    if ha5 not in ("green", "red"):
+        return _no_ev("no_5m_trend")
+    # ── MOMENTUM (1m HA aligned + fresh) ──
+    if ha1 != ha5:
+        return _no_ev("momentum_not_aligned")
+    if not (fresh_min <= streak1 <= fresh_max):
+        return _no_ev(f"not_fresh_{streak1}")
 
-    side = "UP" if ev_up >= ev_down else "DOWN"
-    p = p_up if side == "UP" else p_down
+    side = "UP" if ha5 == "green" else "DOWN"
+    p = p_up if side == "UP" else (1.0 - p_up)
     price = price_up if side == "UP" else price_down
-    ev = ev_up if side == "UP" else ev_down
+    ev = p - price
 
-    min_prob = inputs.get("minProb", 0.55)
-    ev_threshold = inputs.get("evThreshold", 0.04)
-
-    # ── VETO filters — never chase a stretched move or trade into RSI extremes ──
-    if side == "UP" and inputs.get("haExhaustedGreen"):
-        return _no_ev("ha_exhausted_up")
-    if side == "DOWN" and inputs.get("haExhaustedRed"):
-        return _no_ev("ha_exhausted_down")
-
+    # ── RSI trend confirmation at the 50 line (>=50 up, <50 down) — REQUIRED ──
     rsi = inputs.get("rsi")
-    if rsi is not None:
-        if side == "UP" and rsi > 70:
-            return _no_ev("rsi_overbought")
-        if side == "DOWN" and rsi < 30:
-            return _no_ev("rsi_oversold")
+    if rsi is None:
+        return _no_ev("rsi_unavailable")
+    if side == "UP" and rsi < 50:
+        return _no_ev(f"rsi_{rsi:.0f}_not_uptrend")
+    if side == "DOWN" and rsi >= 50:
+        return _no_ev(f"rsi_{rsi:.0f}_not_downtrend")
 
-    # ── GATES ──
+    # ── EV gate: good price to enter the trend ──
     if p < min_prob:
         return _no_ev(f"prob_{p:.2f}_below_{min_prob:.2f}")
     if ev < ev_threshold:
@@ -70,6 +72,6 @@ def decide_ev(inputs: Dict[str, Any]) -> Dict[str, Any]:
 
     strength = "HIGH_CONVICTION" if p >= 0.70 else "STRONG"
     return {
-        "action": "ENTER", "side": side, "phase": "EV", "strength": strength,
-        "prob": p, "price": price, "ev": ev, "reason": "ev_enter"
+        "action": "ENTER", "side": side, "phase": "TREND_EV", "strength": strength,
+        "prob": p, "price": price, "ev": ev, "streak": streak1, "reason": "trend_momentum_ev"
     }

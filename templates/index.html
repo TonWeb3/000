@@ -118,8 +118,8 @@
                 <h3 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Technical Indicators</h3>
                 <div class="space-y-4">
                     <div class="flex justify-between text-sm sm:text-base">
-                        <span class="text-gray-400">RSI (14)</span>
-                        <span :class="data.indicators?.rsi > 70 ? 'text-red-400' : (data.indicators?.rsi < 30 ? 'text-green-400' : 'text-white')" x-text="data.indicators?.rsi != null ? data.indicators.rsi.toFixed(2) : 'NaN'"></span>
+                        <span class="text-gray-400">RSI (14) · 50-line</span>
+                        <span :class="data.indicators?.rsi == null ? 'text-white' : (data.indicators.rsi >= 50 ? 'text-green-400' : 'text-red-400')" x-text="data.indicators?.rsi != null ? data.indicators.rsi.toFixed(2) : 'NaN'"></span>
                     </div>
                     <div class="flex justify-between text-sm sm:text-base">
                         <span class="text-gray-400">Heiken Ashi (1m)</span>

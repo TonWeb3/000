@@ -36,17 +36,21 @@ class Settings(BaseSettings):
     RISK_TYPE: str = "percent"
     RISK_VALUE: float = 10.0
 
-    # ── Latency-arb entry engine ────────────────────────────────────────────────
-    # Fair probability (fast, from Binance spot) vs Polymarket's implied price.
-    # Enter when EV = fair - ask_price clears EV_THRESHOLD (the book looks stale).
-    EV_THRESHOLD: float = 0.04          # require >= this expected value per $1 share (after price)
-    MIN_PROB_EV: float = 0.55           # don't bet near-coinflips even if EV looks positive
+    # ── EV price gate ───────────────────────────────────────────────────────────
+    # After HA(5m trend)+HA(1m fresh momentum)+RSI(50) pick the side, EV finds the
+    # price: fair prob (fast, from Binance spot) vs the Polymarket ask on that side.
+    EV_THRESHOLD: float = 0.04          # require fair - ask >= this to enter the trend
+    MIN_PROB_EV: float = 0.55           # trend side's fair prob must be >= this (HA<->price agreement)
     MIN_BOOK_LIQUIDITY_USD: float = 20.0  # skip if the ask side can't absorb the stake
 
-    # Close-and-flip the open position to the opposite side, late in the window.
+    # Entry: 5m HA trend + fresh 1m HA momentum + RSI(50) confirm + EV — all mandatory.
+    # FRESH_MIN/MAX apply ONLY to the 1m HA streak (the momentum leg). Fixed in code.
+    FRESH_MIN: int = 1              # 1m HA streak must be >= this (a started move)
+    FRESH_MAX: int = 6             # ...and <= this (still fresh, not over-extended)
+
+    # Close-and-flip: reverse the position when the entry signal flips to the opposite
+    # side (the decide_entry signal is the confirmation; no conviction/time gate).
     FLIP_ENABLED: bool = False
-    FLIP_MIN_CONVICTION: float = 0.60   # opposite side's fair prob must be >= this to flip
-    FLIP_MIN_MINUTES_LEFT: float = 4.0  # only flip once LESS than this many minutes remain
 
     RSI_PERIOD: int = 14
 
@@ -153,8 +157,6 @@ def load_settings():
             if "flip" in config_data:
                 flip = config_data["flip"]
                 if "enabled" in flip: base_settings.FLIP_ENABLED = bool(flip["enabled"])
-                if "min_conviction" in flip: base_settings.FLIP_MIN_CONVICTION = float(flip["min_conviction"])
-                if "min_minutes_left" in flip: base_settings.FLIP_MIN_MINUTES_LEFT = float(flip["min_minutes_left"])
 
             if "chainlink" in config_data:
                 cl = config_data["chainlink"]

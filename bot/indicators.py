@@ -6,7 +6,7 @@ from typing import List, Optional, Dict
 
 
 def compute_rsi(closes: List[float], period: int) -> Optional[float]:
-    """RSI(period). Used as a veto: don't buy UP into >70 / DOWN into <30."""
+    """RSI(period). Used as trend confirmation at the 50 line (>=50 up, <50 down)."""
     if not closes or len(closes) < period:
         return None
     series = pd.Series(closes)
@@ -18,7 +18,7 @@ def compute_rsi(closes: List[float], period: int) -> Optional[float]:
 
 
 def compute_heiken_ashi(candles: List[Dict]) -> List[Dict]:
-    """Heiken-Ashi candles. Used (via count_consecutive) for the exhaustion veto."""
+    """Heiken-Ashi candles. Used (via count_consecutive) for the 5m trend & 1m momentum."""
     if not candles:
         return []
 
@@ -48,7 +48,7 @@ def compute_heiken_ashi(candles: List[Dict]) -> List[Dict]:
 
 
 def count_consecutive(ha_candles: List[Dict]) -> Dict:
-    """Length of the current same-colour Heiken-Ashi streak (>=6 = exhausted)."""
+    """Current same-colour Heiken-Ashi streak {color, count} (1m momentum: 1..6 = fresh)."""
     if not ha_candles or len(ha_candles) < 2:
         return {"color": None, "count": None}
 
@@ -83,9 +83,9 @@ def realized_drift_vol(candles: List[Dict], lookback: int = 300):
 def fair_prob_up(current_price: float, strike: float, steps: int,
                  sigma_per_step: Optional[float], drift_per_step: float = 0.0) -> float:
     """Closed-form GBM probability that price closes ABOVE `strike` after `steps`
-    5-minute intervals — the core direction/edge model. The model is just
-    persistence: "is spot above the open, given the volatility still to come?"
-    Returns 0..1.
+    5-minute intervals — the EV "fair" side. Reads as "is spot above the open, given
+    the volatility still to come?" Compared against the Polymarket ask (EV = fair - ask)
+    and the min_prob gate. Returns 0..1.
     """
     if not current_price or not strike or current_price <= 0 or strike <= 0:
         return 0.5

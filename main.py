@@ -246,7 +246,7 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
 
 async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[str, Any], target_open: float, token_ids: Dict[str, Any], orderbook: Optional[Dict[str, Any]] = None):
     # Open a fresh position on `side`: sizing, liquidity trim, and paper/live execution.
-    # Entry GATES (the decide_ev signal, slot/market-busy) are the caller's responsibility
+    # Entry GATES (the decide_entry signal, slot/market-busy) are the caller's responsibility
     # — a flip reuses this to open the opposite side unconditionally.
     price = market_prices["up"] if side == "UP" else market_prices["down"]
     if price is None:
@@ -340,23 +340,17 @@ async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[
             log_message(f"LIVE trade FAILED ({side}): {result.get('error')}")
             return "live_order_failed"
 
-async def maybe_flip_position(fav_side: Optional[str], fav_prob: Optional[float], poly_snapshot: Dict[str, Any], target_open: float, time_left_min: Optional[float]):
-    """Close the running position and flip to the OPPOSITE side late in the window.
-    No HA/RSI vetoes. Two gates only: the favoured side's fair probability must be
-    >= FLIP_MIN_CONVICTION, and there must be LESS than FLIP_MIN_MINUTES_LEFT remaining
-    (i.e. flips fire only near the window's end). FLIP_ENABLED is the master switch.
-    (Fresh entries still go through the gated execute_trade.)
+async def maybe_flip_position(decision: Dict[str, Any], poly_snapshot: Dict[str, Any], target_open: float):
+    """Flip the running position the instant the ENTRY signal flips to the opposite side.
+    The decide_entry signal itself (5m HA trend + fresh 1m momentum + RSI(50) + EV) IS the
+    confirmation — NO conviction or time-left gate; a flip can fire anytime in the window.
+    FLIP_ENABLED is the only switch.
     """
     if not settings.FLIP_ENABLED:
         return
-    if fav_side is None or not state["active_trades"]:
+    if decision.get("action") != "ENTER" or not state["active_trades"]:
         return
-    # Conviction gate: only flip into a side the model is at least this sure of.
-    if (fav_prob or 0) < settings.FLIP_MIN_CONVICTION:
-        return
-    # Late-window only: flip only once LESS than FLIP_MIN_MINUTES_LEFT remains.
-    if time_left_min is not None and time_left_min >= settings.FLIP_MIN_MINUTES_LEFT:
-        return
+    new_side = decision["side"]
 
     market = poly_snapshot["market"]
     prices = poly_snapshot["prices"]
@@ -369,8 +363,8 @@ async def maybe_flip_position(fav_side: Optional[str], fav_prob: Optional[float]
     trade = next((t for t in state["active_trades"]
                   if str(t.get("market_id")) == str(market.get("id"))
                   and now_ts < (t.get("end_ts") or float("inf"))), None)
-    if trade is None or trade["side"] == fav_side:
-        return  # nothing running here, or already on the favoured side
+    if trade is None or trade["side"] == new_side:
+        return  # nothing running here, or already on the signalled side
 
     held_key = "up" if trade["side"] == "UP" else "down"
     ob = orderbook.get(held_key) or {}
@@ -398,12 +392,11 @@ async def maybe_flip_position(fav_side: Optional[str], fav_prob: Optional[float]
     state["active_trades"] = [t for t in state["active_trades"] if t is not trade]
     state["last_trade_side"] = None
     save_state()
-    log_message(f"FLIP: closed {trade['side']} @ {exit_price:.2f} (P/L ${trade['profit_loss']:.2f}); opening {fav_side}")
+    log_message(f"FLIP: closed {trade['side']} @ {exit_price:.2f} (P/L ${trade['profit_loss']:.2f}); opening {new_side}")
 
-    # Open the opposite side immediately — the slot is now free. Done here (not via the
-    # gated execute_trade) so the flip happens even when the entry signal is vetoed.
-    open_result = await _open_position(fav_side, prices, market, target_open, token_ids, orderbook)
-    log_message(f"FLIP: open {fav_side} -> {open_result}")
+    # Open the opposite side immediately — the slot is now free.
+    open_result = await _open_position(new_side, prices, market, target_open, token_ids, orderbook)
+    log_message(f"FLIP: open {new_side} -> {open_result}")
 
 async def update_trades(current_prices: Dict[str, Any]):
     remaining_active = []
@@ -473,12 +466,10 @@ async def update_trades(current_prices: Dict[str, Any]):
         up_index = next((i for i, x in enumerate(outcomes) if x.lower() == settings.POLYMARKET_UP_LABEL.lower()), 0)
         down_index = next((i for i, x in enumerate(outcomes) if x.lower() == settings.POLYMARKET_DOWN_LABEL.lower()), 1)
 
-        # AUTHORITATIVE resolution ONLY: the resolved Polymarket outcome trades at ~$1,
-        # which equals the on-chain payout — the single source of truth for win/loss.
-        # We deliberately do NOT infer the result from spot-vs-strike: the bot's strike
-        # (Binance 5m open at entry) and its spot feed differ from Polymarket's
-        # Chainlink-based resolution, so a price guess can mislabel a loss as a win.
-        # If Polymarket hasn't resolved yet, we keep waiting (below) instead of guessing.
+        # Resolution: prefer Polymarket's AUTHORITATIVE result (the settled outcome
+        # trades at ~$1 = the on-chain payout). If that isn't readable by expiry, fall
+        # back to the bot's own CHAINLINK window open-vs-close (same feed Polymarket
+        # settles on) — see step 2 below. Only VOID if neither is available.
         winning_index = -1
         resolved_by = None
         # 1) Authoritative: a settled Polymarket outcome trades at ~$1.
@@ -615,8 +606,7 @@ async def update_loop():
                         target_open = c["open"]
                         break
 
-            # Fast closed-form fair probability (replaces 1000-sim Monte Carlo —
-            # backtest-verified equivalent, ~1000x cheaper, which a latency play needs).
+            # Fast closed-form fair probability (the EV "fair" side, from Binance spot).
             drift_5m, sigma_5m = indicators.realized_drift_vol(klines_5m, lookback=300)
             fair_up = indicators.fair_prob_up(spot_price or 0, target_open or 0, mc_steps, sigma_5m, drift_per_step=drift_5m or 0.0)
             fair_data = {
@@ -670,7 +660,7 @@ async def update_loop():
             closes = [c["close"] for c in klines_1m]
             rsi_now = indicators.compute_rsi(closes, settings.RSI_PERIOD)
 
-            # Heiken-Ashi streaks (1m & 5m) — the exhaustion veto.
+            # Heiken-Ashi streaks: 5m = trend, 1m = fresh momentum (used by decide_entry).
             consec = indicators.count_consecutive(indicators.compute_heiken_ashi(klines_1m))
             consec_5m = {"color": None, "count": 0}
             if len(klines_5m) >= 20:
@@ -693,30 +683,22 @@ async def update_loop():
             }
             prob_view = {"adjustedUp": fair_up, "adjustedDown": 1 - fair_up}
 
-            # Heiken-Ashi exhaustion veto (>=6 bars in one direction = don't chase).
-            EB = engines.EXHAUSTION_BARS
-
-            def _is(color, count, want):
-                return color == want and (count or 0) >= EB
-
-            ha_exhausted_green = _is(consec["color"], consec["count"], "green") or _is(consec_5m["color"], consec_5m["count"], "green")
-            ha_exhausted_red = _is(consec["color"], consec["count"], "red") or _is(consec_5m["color"], consec_5m["count"], "red")
-
-            decision = engines.decide_ev({
+            # ── ENTRY: 5m HA trend + fresh 1m HA momentum set DIRECTION; EV finds price ──
+            # 5m HA colour = trend (red->DOWN, green->UP). 1m HA must match it and be a
+            # FRESH streak (freshMin..freshMax bars). RSI(50) confirms. EV picks the price.
+            decision = engines.decide_entry({
+                "ha5Color": consec_5m["color"],          # 5m trend
+                "ha1Color": consec["color"],             # 1m momentum
+                "ha1Streak": consec["count"],
                 "mcProbUp": fair_up,
                 "priceUp": market_up,
                 "priceDown": market_down,
                 "minProb": settings.MIN_PROB_EV,
                 "evThreshold": settings.EV_THRESHOLD,
+                "freshMin": settings.FRESH_MIN,
+                "freshMax": settings.FRESH_MAX,
                 "rsi": rsi_now,
-                "haExhaustedGreen": ha_exhausted_green,
-                "haExhaustedRed": ha_exhausted_red,
             })
-
-            # Flip side chosen PURELY by the model's fair probability (fair_prob_up) —
-            # NO EV / market price. (EV would let a tiny-edge flip through and ruin it.)
-            fav_side = "UP" if fair_up >= 0.5 else "DOWN"
-            fav_prob = fair_up if fav_side == "UP" else (1.0 - fair_up)
 
             current_prices_dict = {"spot": spot_price, "chainlink": current_price}
 
@@ -724,7 +706,7 @@ async def update_loop():
             # and the dashboard keep updating regardless so the balance view stays live.
             exec_result = None
             if poly_snapshot["ok"] and state["running"]:
-                await maybe_flip_position(fav_side, fav_prob, poly_snapshot, target_open, time_left_min)
+                await maybe_flip_position(decision, poly_snapshot, target_open)
                 exec_result = await execute_trade(decision, poly_snapshot["prices"], poly_snapshot["market"], target_open, poly_snapshot.get("token_ids", {}), poly_snapshot.get("orderbook", {}))
             elif not state["running"]:
                 exec_result = "stopped"
@@ -841,9 +823,7 @@ async def get_settings():
             "min_book_liquidity_usd": settings.MIN_BOOK_LIQUIDITY_USD
         },
         "flip": {
-            "enabled": settings.FLIP_ENABLED,
-            "min_conviction": settings.FLIP_MIN_CONVICTION,
-            "min_minutes_left": settings.FLIP_MIN_MINUTES_LEFT
+            "enabled": settings.FLIP_ENABLED
         }
     }
 
@@ -907,8 +887,6 @@ async def post_settings(new_settings: Dict[str, Any]):
         f = new_settings["flip"]
         if "enabled" in f:
             settings.FLIP_ENABLED = bool(f["enabled"])
-        settings.FLIP_MIN_CONVICTION = float(f.get("min_conviction", settings.FLIP_MIN_CONVICTION))
-        settings.FLIP_MIN_MINUTES_LEFT = float(f.get("min_minutes_left", settings.FLIP_MIN_MINUTES_LEFT))
 
     if "polymarket" in new_settings:
         p = new_settings["polymarket"]
