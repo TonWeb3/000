@@ -1,5 +1,5 @@
 {
-  "mode": "live",
+  "mode": "paper",
   "paper_balance_usd": 1000,
   "private_key": "",
   "relayer": {
@@ -23,12 +23,11 @@
     "risk_type": "percent",
     "risk_value": 10
   },
-  "ev": {
-    "ev_threshold": 0.04,
-    "min_prob": 0.55,
+  "entry": {
+    "max_price": 0.6,
     "min_book_liquidity_usd": 20
   },
-  "flip": {
+  "close_on_reversal": {
     "enabled": true
   },
   "chainlink": {

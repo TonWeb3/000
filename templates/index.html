@@ -93,23 +93,11 @@
 
         <!-- Prediction -->
         <div class="bg-gray-800 p-6 sm:p-8 rounded-lg shadow-lg mb-6 sm:mb-8 text-center border-t-2 border-blue-600 overflow-hidden">
-            <p class="text-gray-400 uppercase tracking-widest mb-4 text-xs sm:text-sm">Current Prediction</p>
-            <div class="flex flex-col sm:flex-row justify-center items-center space-y-4 sm:space-y-0 sm:space-x-12">
-                <div class="text-center order-2 sm:order-1">
-                    <p class="text-green-400 text-2xl sm:text-4xl font-bold" x-text="data.analysis?.probability?.adjustedUp != null ? (data.analysis.probability.adjustedUp * 100).toFixed(1) + '%' : 'NaN'"></p>
-                    <p class="text-[10px] sm:text-xs text-gray-500">PROB UP</p>
-                </div>
-                <div class="text-center order-1 sm:order-2">
-                    <div class="text-3xl sm:text-5xl font-black mb-1 sm:mb-2" :class="data.analysis?.decision?.action === 'ENTER' ? (data.analysis?.decision?.side === 'UP' ? 'text-green-500' : 'text-red-500') : 'text-gray-600'">
-                        <span x-text="data.analysis?.probability?.adjustedUp != null ? (data.analysis?.decision?.action === 'ENTER' ? (data.analysis?.decision?.side === 'UP' ? 'BUY UP ↑' : 'BUY DOWN ↓') : 'NO TRADE') : 'NaN'"></span>
-                    </div>
-                    <p class="text-[10px] sm:text-xs uppercase text-gray-400 font-bold" x-text="data.analysis?.probability?.adjustedUp != null ? (data.analysis?.decision?.reason || '') : 'MISSING DATA'"></p>
-                </div>
-                <div class="text-center order-3">
-                    <p class="text-red-400 text-2xl sm:text-4xl font-bold" x-text="data.analysis?.probability?.adjustedDown != null ? (data.analysis.probability.adjustedDown * 100).toFixed(1) + '%' : 'NaN'"></p>
-                    <p class="text-[10px] sm:text-xs text-gray-500">PROB DOWN</p>
-                </div>
+            <p class="text-gray-400 uppercase tracking-widest mb-4 text-xs sm:text-sm">Current Signal</p>
+            <div class="text-3xl sm:text-5xl font-black mb-1 sm:mb-2" :class="data.analysis?.decision?.action === 'ENTER' ? (data.analysis?.decision?.side === 'UP' ? 'text-green-500' : 'text-red-500') : 'text-gray-600'">
+                <span x-text="data.analysis?.decision?.action === 'ENTER' ? (data.analysis?.decision?.side === 'UP' ? 'BUY UP ↑' : 'BUY DOWN ↓') : 'NO TRADE'"></span>
             </div>
+            <p class="text-[10px] sm:text-xs uppercase text-gray-400 font-bold" x-text="data.analysis?.decision?.reason || '—'"></p>
         </div>
 
         <!-- Indicators -->
@@ -132,13 +120,14 @@
                               x-text="data.indicators?.heiken_5m?.count != null ? (data.indicators?.heiken_5m?.color + ' x' + data.indicators?.heiken_5m?.count) : 'NaN'"></span>
                     </div>
                     <div class="flex justify-between text-sm sm:text-base">
-                        <span class="text-gray-400">Fair Probability (15m Close)</span>
-                        <div class="flex flex-col items-end">
-                            <span :class="data.indicators?.fair?.bias === 'BULLISH' ? 'text-green-400' : (data.indicators?.fair?.bias === 'BEARISH' ? 'text-red-400' : 'text-gray-400')"
-                                  x-text="data.indicators?.fair?.prob_up != null ? ((data.indicators.fair.prob_up * 100).toFixed(1) + '% UP') : 'NaN'"></span>
-                            <span :class="data.indicators?.fair?.bias === 'BEARISH' ? 'text-green-400' : (data.indicators?.fair?.bias === 'BULLISH' ? 'text-red-400' : 'text-gray-400')"
-                                  x-text="data.indicators?.fair?.prob_down != null ? ((data.indicators.fair.prob_down * 100).toFixed(1) + '% DOWN') : ''" class="text-[10px]"></span>
-                        </div>
+                        <span class="text-gray-400">Awesome Osc (1m)</span>
+                        <span :class="data.indicators?.ao?.m1?.color === 'green' ? 'text-green-400' : (data.indicators?.ao?.m1?.color === 'red' ? 'text-red-400' : 'text-gray-500')"
+                              x-text="data.indicators?.ao?.m1?.count != null ? (data.indicators?.ao?.m1?.color + ' x' + data.indicators?.ao?.m1?.count) : 'NaN'"></span>
+                    </div>
+                    <div class="flex justify-between text-sm sm:text-base">
+                        <span class="text-gray-400">Awesome Osc (5m)</span>
+                        <span :class="data.indicators?.ao?.m5?.color === 'green' ? 'text-green-400' : (data.indicators?.ao?.m5?.color === 'red' ? 'text-red-400' : 'text-gray-500')"
+                              x-text="data.indicators?.ao?.m5?.count != null ? (data.indicators?.ao?.m5?.color + ' x' + data.indicators?.ao?.m5?.count) : 'NaN'"></span>
                     </div>
                 </div>
             </div>
@@ -153,11 +142,6 @@
                     <div class="flex justify-between items-center text-sm sm:text-base">
                         <span class="text-red-400 font-bold uppercase">Down (NO)</span>
                         <span class="text-xl sm:text-2xl font-mono text-red-400" x-text="data.prices?.poly_down ? (data.prices.poly_down * 100).toFixed(0) + '¢' : '-'"></span>
-                    </div>
-                    <div class="flex justify-between border-t border-gray-700 pt-2 text-sm sm:text-base">
-                        <span class="text-gray-400">Model Edge (UP)</span>
-                        <span :class="data.analysis?.edge?.edgeUp > 0 ? 'text-green-400' : (data.analysis?.edge?.edgeUp < 0 ? 'text-red-400' : 'text-gray-500')"
-                              x-text="data.analysis?.edge?.edgeUp != null ? (data.analysis.edge.edgeUp * 100).toFixed(1) + '%' : 'NaN'"></span>
                     </div>
                 </div>
             </div>

@@ -36,21 +36,18 @@ class Settings(BaseSettings):
     RISK_TYPE: str = "percent"
     RISK_VALUE: float = 10.0
 
-    # ── EV price gate ───────────────────────────────────────────────────────────
-    # After HA(5m trend)+HA(1m fresh momentum)+RSI(50) pick the side, EV finds the
-    # price: fair prob (fast, from Binance spot) vs the Polymarket ask on that side.
-    EV_THRESHOLD: float = 0.04          # require fair - ask >= this to enter the trend
-    MIN_PROB_EV: float = 0.55           # trend side's fair prob must be >= this (HA<->price agreement)
+    # ── Entry price gate (replaces EV) ──────────────────────────────────────────
+    # After HA(5m trend)+HA(1m)+AO(5m/1m)+RSI(50) confirm the side, the only price
+    # gate is a cap on the Polymarket odds: enter only when the side's ask is BELOW this.
+    MAX_ENTRY_PRICE: float = 0.60       # skip if the side's odds (ask price) are >= this
     MIN_BOOK_LIQUIDITY_USD: float = 20.0  # skip if the ask side can't absorb the stake
 
-    # Entry: 5m HA trend + fresh 1m HA momentum + RSI(50) confirm + EV — all mandatory.
-    # FRESH_MIN/MAX apply ONLY to the 1m HA streak (the momentum leg). Fixed in code.
-    FRESH_MIN: int = 1              # 1m HA streak must be >= this (a started move)
-    FRESH_MAX: int = 6             # ...and <= this (still fresh, not over-extended)
+    # Entry gates (all mandatory): 5m HA trend + 1m HA momentum (colour) + Awesome
+    # Oscillator(5m & 1m by bar colour, rising=green) + RSI(50) confirm; then EV finds price.
 
-    # Close-and-flip: reverse the position when the entry signal flips to the opposite
-    # side (the decide_entry signal is the confirmation; no conviction/time gate).
-    FLIP_ENABLED: bool = False
+    # Close-on-reversal: CLOSE (do not reverse) a running position when the 1m HA AND the
+    # 1m AO both flip against it. Only closes the position — never opens the opposite side.
+    CLOSE_ON_REVERSAL_ENABLED: bool = False
 
     RSI_PERIOD: int = 14
 
@@ -148,15 +145,14 @@ def load_settings():
                 if "risk_type" in trading: base_settings.RISK_TYPE = trading["risk_type"]
                 if "risk_value" in trading: base_settings.RISK_VALUE = trading["risk_value"]
 
-            if "ev" in config_data:
-                ev = config_data["ev"]
-                if "ev_threshold" in ev: base_settings.EV_THRESHOLD = float(ev["ev_threshold"])
-                if "min_prob" in ev: base_settings.MIN_PROB_EV = float(ev["min_prob"])
-                if "min_book_liquidity_usd" in ev: base_settings.MIN_BOOK_LIQUIDITY_USD = float(ev["min_book_liquidity_usd"])
+            if "entry" in config_data:
+                en = config_data["entry"]
+                if "max_price" in en: base_settings.MAX_ENTRY_PRICE = float(en["max_price"])
+                if "min_book_liquidity_usd" in en: base_settings.MIN_BOOK_LIQUIDITY_USD = float(en["min_book_liquidity_usd"])
 
-            if "flip" in config_data:
-                flip = config_data["flip"]
-                if "enabled" in flip: base_settings.FLIP_ENABLED = bool(flip["enabled"])
+            if "close_on_reversal" in config_data:
+                cor = config_data["close_on_reversal"]
+                if "enabled" in cor: base_settings.CLOSE_ON_REVERSAL_ENABLED = bool(cor["enabled"])
 
             if "chainlink" in config_data:
                 cl = config_data["chainlink"]

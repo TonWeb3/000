@@ -1,7 +1,5 @@
 import pandas as pd
-import numpy as np
-import math
-from ta.momentum import RSIIndicator
+from ta.momentum import RSIIndicator, AwesomeOscillatorIndicator
 from typing import List, Optional, Dict
 
 
@@ -66,35 +64,29 @@ def count_consecutive(ha_candles: List[Dict]) -> Dict:
     return {"color": target, "count": count}
 
 
-def realized_drift_vol(candles: List[Dict], lookback: int = 300):
-    """(mean, std) of per-candle log returns — the per-step drift & sigma for the
-    fair-prob model. Returns (None, None) if there isn't enough data."""
-    closes = [c["close"] for c in candles[-lookback:] if c.get("close")]
-    if len(closes) < 20:
-        return None, None
-    arr = np.asarray(closes, dtype=float)
-    rets = np.diff(np.log(arr))
-    rets = rets[np.isfinite(rets)]
-    if len(rets) < 10:
-        return None, None
-    return float(np.mean(rets)), float(np.std(rets))
-
-
-def fair_prob_up(current_price: float, strike: float, steps: int,
-                 sigma_per_step: Optional[float], drift_per_step: float = 0.0) -> float:
-    """Closed-form GBM probability that price closes ABOVE `strike` after `steps`
-    5-minute intervals — the EV "fair" side. Reads as "is spot above the open, given
-    the volatility still to come?" Compared against the Polymarket ask (EV = fair - ask)
-    and the min_prob gate. Returns 0..1.
-    """
-    if not current_price or not strike or current_price <= 0 or strike <= 0:
-        return 0.5
-    n = max(1, int(steps))
-    if sigma_per_step is None or sigma_per_step <= 0:
-        return 1.0 if current_price > strike else 0.0
-    mu = (drift_per_step - 0.5 * sigma_per_step ** 2) * n
-    sd = sigma_per_step * math.sqrt(n)
-    # P(S * exp(X) > K) for X ~ N(mu, sd^2)  ->  1 - Phi(z)  ->  0.5 * erfc(z/sqrt2)
-    z = (math.log(strike / current_price) - mu) / sd
-    prob = 0.5 * math.erfc(z / math.sqrt(2))
-    return float(min(1.0, max(0.0, prob)))
+def compute_awesome_oscillator(candles: List[Dict], fast: int = 5, slow: int = 34) -> Dict:
+    """Awesome Oscillator (ta lib): SMA(median, 5) - SMA(median, 34), median=(high+low)/2.
+    Bar COLOUR follows the standard AO histogram (TradingView/Pine): with
+    `diff = ao - ao[1]`, the bar is GREEN when rising (diff > 0) and RED when falling or
+    flat (diff <= 0). Returns {value, color, count}: latest AO value, its bar colour, and
+    the consecutive same-colour streak length. The DECISION uses the colour; the streak is
+    informational (displayed like the HA). All None if not enough candles (needs > slow)."""
+    none = {"value": None, "color": None, "count": None}
+    if not candles or len(candles) < slow + 1:
+        return none
+    highs = pd.Series([c["high"] for c in candles])
+    lows = pd.Series([c["low"] for c in candles])
+    ao = AwesomeOscillatorIndicator(high=highs, low=lows, window1=fast, window2=slow,
+                                    fillna=False).awesome_oscillator().dropna()
+    if len(ao) < 2:
+        return none
+    vals = ao.values
+    diffs = [vals[i] - vals[i - 1] for i in range(1, len(vals))]  # diff[i] = ao[i] - ao[i-1]
+    last_green = diffs[-1] > 0                                    # diff <= 0 -> red (Pine)
+    count = 0
+    for d in diffs[::-1]:
+        if (d > 0) == last_green:
+            count += 1
+        else:
+            break
+    return {"value": float(vals[-1]), "color": "green" if last_green else "red", "count": count}

@@ -15,6 +15,24 @@ class ChainlinkFetcher:
         self.cached_fetched_at_ms = 0
         self.min_fetch_interval_ms = 2000
         self.preferred_rpc_url = None
+        self._providers = {}  # rpc_url -> AsyncWeb3 (reused, so its aiohttp session isn't leaked)
+
+    def _get_w3(self, rpc: str):
+        w3 = self._providers.get(rpc)
+        if w3 is None:
+            w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc, request_kwargs={'timeout': 3.0}))
+            self._providers[rpc] = w3
+        return w3
+
+    async def aclose(self):
+        """Close the cached web3 RPC sessions (call on shutdown to avoid aiohttp's
+        'Unclosed client session' warning)."""
+        for w3 in self._providers.values():
+            try:
+                await w3.provider.disconnect()
+            except Exception:
+                pass
+        self._providers.clear()
 
     def get_ordered_rpcs(self):
         from_list = settings.POLYGON_RPC_URLS
@@ -43,7 +61,7 @@ class ChainlinkFetcher:
         aggregator_address = settings.CHAINLINK_BTC_USD_AGGREGATOR
         for rpc in rpcs:
             try:
-                w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc, request_kwargs={'timeout': 3.0}))
+                w3 = self._get_w3(rpc)
                 contract = w3.eth.contract(address=AsyncWeb3.to_checksum_address(aggregator_address), abi=AGGREGATOR_ABI)
 
                 if self.cached_decimals is None:
