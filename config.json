@@ -28,7 +28,8 @@
     "min_book_liquidity_usd": 20
   },
   "close_on_reversal": {
-    "enabled": true
+    "enabled": true,
+    "bars": 3
   },
   "chainlink": {
     "polygon_rpc_url": "https://polygon.drpc.org",

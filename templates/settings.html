@@ -96,7 +96,13 @@
                         <input type="checkbox" x-model="form.close_on_reversal.enabled" class="w-4 h-4">
                         <span class="text-sm font-bold text-blue-400 uppercase">Close on 1m Reversal</span>
                     </label>
-                    <p class="text-[10px] text-gray-500 mt-2 italic">When on, an open position is <strong>closed</strong> (not reversed) once the <strong>1m HA and the 1m AO both flip against it</strong> — e.g. holding UP and both turn red → sell the UP and go flat. It only closes the position; it never opens the opposite side. Sells into the book in live mode.</p>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-1">
+                        <div>
+                            <label class="block text-[10px] text-gray-500 mb-1 uppercase">Reversal Bars (1m HA &amp; AO)</label>
+                            <input type="number" step="1" min="1" x-model.number="form.close_on_reversal.bars" class="w-full bg-gray-700 border-none rounded p-2 text-xs text-white">
+                        </div>
+                    </div>
+                    <p class="text-[10px] text-gray-500 mt-2 italic">When on, an open position is <strong>closed</strong> (not reversed) once the <strong>1m HA and the 1m AO have both flipped against it for ≥ Reversal Bars consecutive bars</strong> (e.g. 3) — holding UP, both red ×3 → sell the UP and go flat. The bar count avoids closing on a single-bar flicker. It only closes (never reverses), and the window is then locked for the rest of the 15m (one entry per window). Sells into the book in live mode.</p>
                 </div>
             </div>
 
@@ -158,7 +164,7 @@
                     entry: { max_price: 0.60, min_book_liquidity_usd: 20.0 },
                     chainlink: { alchemy_api_key: '' },
                     relayer: { api_key: '' },
-                    close_on_reversal: { enabled: false }
+                    close_on_reversal: { enabled: false, bars: 3 }
                 },
                 message: '',
                 messageType: '',

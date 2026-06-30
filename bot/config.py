@@ -46,8 +46,10 @@ class Settings(BaseSettings):
     # Oscillator(5m & 1m by bar colour, rising=green) + RSI(50) confirm; then EV finds price.
 
     # Close-on-reversal: CLOSE (do not reverse) a running position when the 1m HA AND the
-    # 1m AO both flip against it. Only closes the position — never opens the opposite side.
+    # 1m AO both flip against it for >= CLOSE_REVERSAL_BARS consecutive bars. Only closes
+    # the position — never opens the opposite side. Also locks the window (one entry/window).
     CLOSE_ON_REVERSAL_ENABLED: bool = False
+    CLOSE_REVERSAL_BARS: int = 3   # require the 1m HA & 1m AO reversal to hold >= this many bars
 
     RSI_PERIOD: int = 14
 
@@ -153,6 +155,7 @@ def load_settings():
             if "close_on_reversal" in config_data:
                 cor = config_data["close_on_reversal"]
                 if "enabled" in cor: base_settings.CLOSE_ON_REVERSAL_ENABLED = bool(cor["enabled"])
+                if "bars" in cor: base_settings.CLOSE_REVERSAL_BARS = int(cor["bars"])
 
             if "chainlink" in config_data:
                 cl = config_data["chainlink"]

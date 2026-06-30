@@ -91,8 +91,18 @@ state = {
     "last_trade_side": None,
     "last_balance_refresh": 0,
     "running": False,  # trading is off until the user presses Start on the dashboard
-    "window_marks": {}  # market_id -> {open, open_ts, last, last_ts}: Chainlink 15m open/close
+    "window_marks": {},  # market_id -> {open, open_ts, last, last_ts}: Chainlink 15m open/close
+    "entered_markets": []  # market_ids already traded — ONE fresh entry per 15m window (flips excepted)
 }
+
+def _mark_window_entered(market_id):
+    """Record that a window (market) has had a position, so it can't be re-entered this
+    15m window (one entry per window). Bounded to the most recent 100."""
+    mid = str(market_id)
+    if mid not in state["entered_markets"]:
+        state["entered_markets"].append(mid)
+        if len(state["entered_markets"]) > 100:
+            state["entered_markets"].pop(0)
 
 def save_state():
     try:
@@ -101,7 +111,8 @@ def save_state():
             "active_trades": state["active_trades"],
             "trade_history": state["trade_history"],
             "last_trade_side": state["last_trade_side"],
-            "window_marks": state["window_marks"]
+            "window_marks": state["window_marks"],
+            "entered_markets": state["entered_markets"]
         }
         with open("state_data.json", "w") as f:
             json.dump(data_to_save, f, indent=2)
@@ -125,6 +136,7 @@ def load_state():
                 state["trade_history"] = loaded.get("trade_history", [])
                 state["last_trade_side"] = loaded.get("last_trade_side")
                 state["window_marks"] = loaded.get("window_marks", {})
+                state["entered_markets"] = loaded.get("entered_markets", [])
                 log_message("State loaded from state_data.json")
     except Exception as e:
         print(f"Error loading state: {e}")
@@ -284,10 +296,16 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
     if running_here is not None:
         if running_here["side"] == side:
             return "already_in_position"            # already on the signalled side
-        # Opposite signal -> close the held side, then open the new one (flip).
+        # Opposite signal -> close the held side, then open the new one (flip). This is
+        # the ONE exception to "one entry per window" (it requires a held opposite side).
         if not await _close_position(running_here, market_prices, token_ids, orderbook, "signal_flip"):
             return "flip_close_failed"
         log_message(f"FLIP on new signal: {running_here['side']} -> {side}")
+    else:
+        # FRESH entry — ONE per 15m window. If this window already had a position (incl.
+        # one closed early on a 1m reversal), block re-entry until the next market.
+        if str(market.get("id")) in state["entered_markets"]:
+            return "window_done"
 
     # CONSTRAINT: one *running* position at a time. A trade whose 15m window has already
     # ended (only awaiting Polymarket's resolution) no longer blocks a new entry — the next
@@ -403,6 +421,7 @@ async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[
         state["paper_balance"] -= amount_to_risk
         state["active_trades"].append(trade)
         state["last_trade_side"] = side
+        _mark_window_entered(market["id"])
         save_state()
 
         log_message(f"Executed PAPER trade: {side} @ {price} for {market.get('slug')} (Amount: ${amount_to_risk:.2f})")
@@ -424,6 +443,7 @@ async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[
             trade["order_response"] = resp
             state["active_trades"].append(trade)
             state["last_trade_side"] = side
+            _mark_window_entered(market["id"])
             save_state()
             log_message(f"Executed LIVE trade: {side} ${amount_to_risk:.2f} on {market.get('slug')} (order {order_id})")
             return "entered"
@@ -431,10 +451,12 @@ async def _open_position(side: str, market_prices: Dict[str, Any], market: Dict[
             log_message(f"LIVE trade FAILED ({side}): {result.get('error')}")
             return "live_order_failed"
 
-async def maybe_close_on_reversal(ha1_color: Optional[str], ao1_color: Optional[str], poly_snapshot: Dict[str, Any]):
+async def maybe_close_on_reversal(ha1_color: Optional[str], ha1_count: Optional[int], ao1_color: Optional[str], ao1_count: Optional[int], poly_snapshot: Dict[str, Any]):
     """CLOSE a running position (do NOT reverse) when the 1m HA and the 1m AO BOTH flip
-    against it. E.g. holding UP and both the 1m HA and 1m AO turn red -> sell the UP and
-    go flat. This only CLOSES the position — it never opens the opposite side.
+    against it AND each has held the reversal colour for >= CLOSE_REVERSAL_BARS bars
+    (default 3). E.g. holding UP, when both the 1m HA and 1m AO have been red for >=3 bars
+    -> sell the UP and go flat. The bar requirement avoids closing on a single-bar flicker.
+    This only CLOSES the position — it never opens the opposite side.
 
     CLOSE_ON_REVERSAL_ENABLED is the master switch.
     """
@@ -456,10 +478,14 @@ async def maybe_close_on_reversal(ha1_color: Optional[str], ao1_color: Optional[
     if trade is None:
         return
 
-    # Reversal colour = opposite of the held side. Both 1m HA AND 1m AO must show it.
+    # Reversal colour = opposite of the held side. Both 1m HA AND 1m AO must show it,
+    # each for at least CLOSE_REVERSAL_BARS consecutive bars (confirmed, not a flicker).
     reversal = "red" if trade["side"] == "UP" else "green"
+    bars = settings.CLOSE_REVERSAL_BARS
     if ha1_color != reversal or ao1_color != reversal:
-        return  # not a full 1m reversal (HA + AO) against the held side
+        return  # not a 1m reversal (HA + AO) against the held side
+    if (ha1_count or 0) < bars or (ao1_count or 0) < bars:
+        return  # reversal not yet confirmed for >= bars on both 1m HA and 1m AO
 
     # Close only — never open the opposite side.
     await _close_position(trade, poly_snapshot.get("prices"), poly_snapshot.get("token_ids", {}),
@@ -753,8 +779,11 @@ async def update_loop():
             # and the dashboard keep updating regardless so the balance view stays live.
             exec_result = None
             if poly_snapshot["ok"] and state["running"]:
-                await maybe_close_on_reversal(consec["color"], ao_1m["color"], poly_snapshot)
+                # execute_trade FIRST so a full opposite signal FLIPS the position (the
+                # one exception to one-entry-per-window). Then the reversal-close handles a
+                # 1m HA+AO reversal as an exit-only (and the window stays locked after).
                 exec_result = await execute_trade(decision, poly_snapshot["prices"], poly_snapshot["market"], target_open, poly_snapshot.get("token_ids", {}), poly_snapshot.get("orderbook", {}))
+                await maybe_close_on_reversal(consec["color"], consec["count"], ao_1m["color"], ao_1m["count"], poly_snapshot)
             elif not state["running"]:
                 exec_result = "stopped"
 
@@ -869,7 +898,8 @@ async def get_settings():
             "min_book_liquidity_usd": settings.MIN_BOOK_LIQUIDITY_USD
         },
         "close_on_reversal": {
-            "enabled": settings.CLOSE_ON_REVERSAL_ENABLED
+            "enabled": settings.CLOSE_ON_REVERSAL_ENABLED,
+            "bars": settings.CLOSE_REVERSAL_BARS
         }
     }
 
@@ -932,6 +962,8 @@ async def post_settings(new_settings: Dict[str, Any]):
         c = new_settings["close_on_reversal"]
         if "enabled" in c:
             settings.CLOSE_ON_REVERSAL_ENABLED = bool(c["enabled"])
+        if "bars" in c:
+            settings.CLOSE_REVERSAL_BARS = int(c["bars"])
 
     if "polymarket" in new_settings:
         p = new_settings["polymarket"]
