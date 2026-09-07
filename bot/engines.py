@@ -1,85 +1,75 @@
 from typing import Dict, Any
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Entry engine: 5m HA trend + 1m HA momentum + Awesome Oscillator (5m & 1m) +
-#  RSI(50) confirm the DIRECTION; a PRICE CAP on the Polymarket odds is the only
-#  price gate (no EV / fair-probability gate). See decide_entry below.
+#  Latency-arb entry engine.
+#
+#  Backtest verdict: the model has NO predictive edge over the trivial "is spot
+#  already above the 15m open?" baseline — that signal is fully priced by the
+#  market. The only edge left is LATENCY: act on a Binance spot move before
+#  Polymarket's thin book reprices.
+#
+#  The decision is purely a fast fair probability (from Binance spot) vs the
+#  market's implied price. Enter when the gap (expected value) is large enough
+#  that the book looks stale. RSI and Heiken-Ashi survive only as veto filters.
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-def _no_trade(reason: str) -> Dict[str, Any]:
-    return {"action": "NO_TRADE", "side": None, "phase": "TREND", "strength": "-", "reason": reason}
+EXHAUSTION_BARS = 6  # a Heiken-Ashi streak this long is over-extended → veto chasing it
 
 
-def decide_entry(inputs: Dict[str, Any]) -> Dict[str, Any]:
-    """Trend (5m HA) + momentum (1m HA) + AO (5m & 1m) + RSI(50) confirm the DIRECTION;
-    a PRICE CAP on the Polymarket odds is the only price gate. There is NO EV /
-    fair-probability gate on entries.
+def _no_ev(reason: str) -> Dict[str, Any]:
+    return {"action": "NO_TRADE", "side": None, "phase": "EV", "strength": "EV", "reason": reason}
 
-    - 5m HA colour = the trend. Red -> only DOWN, green -> only UP.
-    - 1m HA must be the SAME colour as the 5m (momentum, colour only — no streak).
-    - Awesome Oscillator confirms by BAR COLOUR on BOTH 5m and 1m: green = rising bar
-      (diff > 0), red = falling/flat (diff <= 0). UP needs both AO green, DOWN both red.
-    - RSI(14) confirms at the 50 line: >= 50 = uptrend (UP), < 50 = downtrend (DOWN).
-    - PRICE CAP: the chosen side's Polymarket ask price must be BELOW `maxPrice`
-      (default 0.60) — only buy when the odds are cheap enough.
 
-    All gates are EQUAL and MANDATORY; none overrides another.
+def decide_ev(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """EV gate: fair probability (Binance) vs market ask price (Polymarket).
+
+    EV_side = p_side - ask_price_side. A positive EV beyond `evThreshold` means the
+    book is underpricing the side our fast feed already favours — the latency edge.
+    RSI / Heiken-Ashi are veto filters only; they do NOT distort the probability.
+    Position sizing (percent/fixed of balance) is handled by the caller.
     """
-    ha5 = inputs.get("ha5Color")          # "green" / "red" / None  (trend)
-    ha1 = inputs.get("ha1Color")          # "green" / "red" / None  (momentum, colour only)
-    price_up = inputs.get("priceUp")
-    price_down = inputs.get("priceDown")
-    max_price = inputs.get("maxPrice", 0.60)
+    p_up = inputs.get("mcProbUp")
+    price_up = inputs.get("priceUp")     # ask (buy) price for the UP share, 0..1
+    price_down = inputs.get("priceDown") # ask (buy) price for the DOWN share, 0..1
 
+    if p_up is None:
+        return _no_ev("missing_model_data")
     if price_up is None or price_down is None:
-        return _no_trade("missing_prices")
+        return _no_ev("missing_prices")
 
-    # ── TREND (5m HA) ──
-    if ha5 not in ("green", "red"):
-        return _no_trade("no_5m_trend")
-    # ── MOMENTUM (1m HA aligned with the 5m trend — colour only, no streak) ──
-    if ha1 != ha5:
-        return _no_trade("momentum_not_aligned")
+    p_down = 1.0 - p_up
+    ev_up = p_up - price_up
+    ev_down = p_down - price_down
 
-    side = "UP" if ha5 == "green" else "DOWN"
+    side = "UP" if ev_up >= ev_down else "DOWN"
+    p = p_up if side == "UP" else p_down
     price = price_up if side == "UP" else price_down
+    ev = ev_up if side == "UP" else ev_down
 
-    # ── AWESOME OSCILLATOR confirmation (5m + 1m) by BAR COLOUR — REQUIRED ──
-    # Standard AO histogram: green = rising bar (diff > 0), red = falling/flat (diff <= 0).
-    # Both timeframes must match the side, exactly like the HA colour does.
-    ao5 = inputs.get("ao5")  # "green" / "red" / None
-    ao1 = inputs.get("ao1")  # "green" / "red" / None
-    if ao5 is None or ao1 is None:
-        return _no_trade("ao_unavailable")
-    if side == "UP":
-        if ao5 != "green":
-            return _no_trade("ao5_not_green")
-        if ao1 != "green":
-            return _no_trade("ao1_not_green")
-    else:  # DOWN
-        if ao5 != "red":
-            return _no_trade("ao5_not_red")
-        if ao1 != "red":
-            return _no_trade("ao1_not_red")
+    min_prob = inputs.get("minProb", 0.55)
+    ev_threshold = inputs.get("evThreshold", 0.04)
 
-    # ── RSI trend confirmation at the 50 line (>=50 up, <50 down) — REQUIRED ──
+    # ── VETO filters — never chase a stretched move or trade into RSI extremes ──
+    if side == "UP" and inputs.get("haExhaustedGreen"):
+        return _no_ev("ha_exhausted_up")
+    if side == "DOWN" and inputs.get("haExhaustedRed"):
+        return _no_ev("ha_exhausted_down")
+
     rsi = inputs.get("rsi")
-    if rsi is None:
-        return _no_trade("rsi_unavailable")
-    if side == "UP" and rsi < 50:
-        return _no_trade(f"rsi_{rsi:.0f}_not_uptrend")
-    if side == "DOWN" and rsi >= 50:
-        return _no_trade(f"rsi_{rsi:.0f}_not_downtrend")
+    if rsi is not None:
+        if side == "UP" and rsi > 70:
+            return _no_ev("rsi_overbought")
+        if side == "DOWN" and rsi < 30:
+            return _no_ev("rsi_oversold")
 
-    # ── PRICE CAP (replaces EV): only enter when the odds are below the cap ──
-    if price is None:
-        return _no_trade("no_price")
-    if price >= max_price:
-        return _no_trade(f"price_{price:.2f}_above_{max_price:.2f}")
+    # ── GATES ──
+    if p < min_prob:
+        return _no_ev(f"prob_{p:.2f}_below_{min_prob:.2f}")
+    if ev < ev_threshold:
+        return _no_ev(f"ev_{ev:.3f}_below_{ev_threshold:.3f}")
 
-    strength = "HIGH_CONVICTION" if price <= 0.50 else "STRONG"
+    strength = "HIGH_CONVICTION" if p >= 0.70 else "STRONG"
     return {
-        "action": "ENTER", "side": side, "phase": "TREND", "strength": strength,
-        "price": price, "reason": "trend_confirmed"
+        "action": "ENTER", "side": side, "phase": "EV", "strength": strength,
+        "prob": p, "price": price, "ev": ev, "reason": "ev_enter"
     }
